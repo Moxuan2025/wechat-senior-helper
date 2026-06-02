@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">wechat-senior-helper</string>
+    <string name="accessibility_service_description">微信老年助手无障碍服务，用于识别界面和执行自动化操作</string>
+</resources>

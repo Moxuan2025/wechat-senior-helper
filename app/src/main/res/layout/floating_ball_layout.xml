@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Floating Ball Layout - Overlay control for WeChat automation -->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="wrap_content"
+    android:layout_height="wrap_content"
+    android:orientation="vertical"
+    android:background="#80000000"
+    android:padding="8dp"
+    android:elevation="8dp">
+
+    <!-- Status Text -->
+    <TextView
+        android:id="@+id/tv_status"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="就绪"
+        android:textColor="#FFFFFF"
+        android:textSize="12sp"
+        android:layout_gravity="center_horizontal"
+        android:layout_marginBottom="8dp" />
+
+    <!-- Open WeChat Button -->
+    <Button
+        android:id="@+id/btn_open_wechat"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="打开微信"
+        android:textSize="12sp"
+        android:minWidth="100dp"
+        android:minHeight="36dp"
+        android:layout_marginBottom="4dp" />
+
+    <!-- Execute Transaction Button -->
+    <Button
+        android:id="@+id/btn_execute_tx"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="执行事务"
+        android:textSize="12sp"
+        android:minWidth="100dp"
+        android:minHeight="36dp"
+        android:layout_marginBottom="4dp" />
+
+    <!-- Stop Service Button -->
+    <Button
+        android:id="@+id/btn_stop"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="停止服务"
+        android:textSize="12sp"
+        android:minWidth="100dp"
+        android:minHeight="36dp"
+        android:backgroundTint="#FF5252" />
+
+</LinearLayout>
