@@ -21,6 +21,7 @@ import android.widget.TextView
 import androidx.core.app.NotificationCompat
 import com.example.wechat_senior_helper.MainActivity
 import com.example.wechat_senior_helper.R
+import com.example.wechat_senior_helper.flow.IntentHandler
 import com.example.wechat_senior_helper.transaction.Transaction
 import com.example.wechat_senior_helper.transaction.TransactionScheduler
 import kotlinx.coroutines.CoroutineScope
@@ -47,6 +48,9 @@ class FloatingBallService : Service() {
 
     private var currentTransaction: Transaction? = null
     private var isExecuting = false
+    private var pendingAction: IntentHandler.PendingAction? = null
+    private lateinit var tvMessage: android.widget.TextView
+    private lateinit var btnConfirm: android.widget.Button
 
     override fun onCreate() {
         super.onCreate()
@@ -182,6 +186,87 @@ class FloatingBallService : Service() {
             }
         }
 
+        // Message display + confirm
+        tvMessage = floatingView?.findViewById(R.id.tv_message)!!
+        btnConfirm = floatingView?.findViewById(R.id.btn_confirm)!!
+
+        // Intent input
+        val etIntent = floatingView?.findViewById<EditText>(R.id.et_intent_text)
+        val btnSendIntent = floatingView?.findViewById<Button>(R.id.btn_send_intent)
+        btnSendIntent?.setOnClickListener {
+            val text = etIntent?.text?.toString()?.trim() ?: return@setOnClickListener
+            if (text.isBlank()) return@setOnClickListener
+            etIntent?.text?.clear()
+            val service = AccessibilityServiceStateManager.instance
+            if (service == null) {
+                showMessage("无障碍服务未连接")
+                return@setOnClickListener
+            }
+            Log.e(TAG, "💬 意图输入: $text")
+            updateStatus("思考中...")
+            serviceScope.launch {
+                val result = service.handleIntent(text)
+                when (result) {
+                    is IntentHandler.HandleResult.Executed -> {
+                        showMessage(result.message)
+                        updateStatus("就绪")
+                    }
+                    is IntentHandler.HandleResult.NeedConfirm -> {
+                        val msg = "要${result.pending.friendlyMessage}吗？"
+                        showMessage(msg)
+                        pendingAction = result.pending
+                        btnConfirm.text = "确认：${result.pending.friendlyMessage}"
+                        btnConfirm.visibility = View.VISIBLE
+                        updateStatus("等待确认")
+                    }
+                    is IntentHandler.HandleResult.Reply -> {
+                        showMessage(result.message)
+                        updateStatus("就绪")
+                    }
+                }
+            }
+        }
+
+        // Confirm button
+        btnConfirm.setOnClickListener {
+            val action = pendingAction ?: return@setOnClickListener
+            val service = AccessibilityServiceStateManager.instance ?: return@setOnClickListener
+            btnConfirm.visibility = View.GONE
+            pendingAction = null
+            updateStatus("执行中...")
+            hideFloatingBall()
+            serviceScope.launch {
+                val msg = service.confirmAction(action)
+                showMessage(msg)
+                updateStatus(msg)
+            }
+        }
+
+        // Video call button
+        val btnVideoCall = floatingView?.findViewById<Button>(R.id.btn_video_call)
+        btnVideoCall?.setOnClickListener {
+            if (isExecuting) {
+                updateStatus("操作进行中...")
+                return@setOnClickListener
+            }
+            val service = AccessibilityServiceStateManager.instance
+            if (service == null) {
+                updateStatus("无障碍服务未连接")
+                return@setOnClickListener
+            }
+            Log.e(TAG, "📞 发起语音通话")
+            isExecuting = true
+            updateStatus("发起语音通话...")
+            hideFloatingBall()
+            service.requestVideoCall(true)
+            serviceScope.launch {
+                delay(6000)
+                isExecuting = false
+                showFloatingBall()
+                updateStatus("就绪")
+            }
+        }
+
         btnStop?.setOnClickListener {
             Log.e(TAG, "🛑 点击停止服务按钮")
             stopSelf()
@@ -308,6 +393,12 @@ class FloatingBallService : Service() {
     private fun updateStatus(status: String) {
         floatingView?.findViewById<TextView>(R.id.tv_status)?.text = status
         Log.d(TAG, "状态更新: $status")
+    }
+
+    private fun showMessage(msg: String) {
+        tvMessage.text = msg
+        tvMessage.visibility = View.VISIBLE
+        Log.d(TAG, "消息: $msg")
     }
 
     override fun onBind(intent: Intent?): IBinder? {

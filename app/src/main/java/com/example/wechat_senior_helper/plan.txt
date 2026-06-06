@@ -1,257 +1,123 @@
-要在聊天界面发起语音/视频通话，需要依次点击**加号**、菜单中的**视频通话**，再在后续界面选择**语音通话**。下面给出完整实现，利用坐标点击 + OCR 文字识别，确保跨分辨率稳定。
+### 整合指南：意图识别完全复用现有功能
+
+现有模块已经完全具备**搜索联系人、发送语音、发起通话**的能力，意图识别的执行端只需按顺序调用它们。思路如下：
+
+```
+意图解析(关键词/LLM) → 得到 action + target
+   ↓
+【统一入口】ensureChatWithTarget(target)
+   ├─ 不在微信 → 启动微信并等待
+   ├─ 已在微信但非目标聊天 → 返回首页 → 调用 WeChatSearchContactFlow.execute(target)
+   └─ 已在目标聊天 → 直接跳过
+   ↓
+根据 action 执行：
+   ├─ voice  → WeChatVoiceFlow.sendVoiceMessage()
+   ├─ video  → WeChatVideoCallFlow.makeCall(useVoice)
+   └─ (可扩展)
+```
+
+**关键点：没有任何新造的执行逻辑，全部复用已有 Flow。**
 
 ---
 
-### 1. 新建 `flow/WeChatVideoCallFlow.kt`
+## 一、需要微调的代码（确保复用）
+
+### 1. `IntentHandler.executeConfirmed()` 确保调用已有 Flow
+
 ```kotlin
-package com.example.wechat_senior_helper.flow
+// IntentHandler.kt
+suspend fun executeConfirmed(pending: PendingAction): String {
+    return try {
+        // 核心：导航到目标聊天（内部复用搜索 Flow）
+        val chatReady = chatNavGuard.ensureChatWithTarget(pending.target)
+        if (!chatReady) {
+            return "没有找到「${pending.target}」，请检查名字"
+        }
 
-import android.graphics.Rect
-import android.util.Log
-import com.example.wechat_senior_helper.input.CoordinateInputHelper
-import com.example.wechat_senior_helper.ocr.AccessibilityScreenshotProvider
-import com.example.wechat_senior_helper.ocr.MlKitOcrEngine
-import com.example.wechat_senior_helper.ocr.OcrLine
-import kotlinx.coroutines.delay
-
-class WeChatVideoCallFlow(
-    private val input: CoordinateInputHelper,
-    private val screenshotProvider: AccessibilityScreenshotProvider,
-    private val ocrEngine: MlKitOcrEngine
-) {
-
-    companion object {
-        private const val TAG = "WeChatVideoCallFlow"
-
-        // 加号按钮坐标（输入框右侧）
-        private const val PLUS_BTN_X_RATIO = 0.95f
-        private const val PLUS_BTN_Y_RATIO = 0.93f
-
-        // 菜单弹出等待
-        private const val MENU_DELAY_MS = 500L
-        // 界面切换等待
-        private const val PAGE_DELAY_MS = 800L
-
-        // OCR 裁剪区域：从屏幕 40% 到 100%（覆盖菜单和底部面板）
-        private const val CROP_TOP_RATIO = 0.4f
-
-        // 文字匹配阈值（Levenshtein 相似度）
-        private const val MATCH_THRESHOLD = 0.75f
-    }
-
-    /**
-     * 发起语音通话（默认），可切换为视频通话
-     * @param useVoice true=语音通话，false=视频通话
-     */
-    suspend fun makeCall(useVoice: Boolean = true): Boolean {
-        return try {
-            // 1. 点击加号
-            input.tapByRatio(PLUS_BTN_X_RATIO, PLUS_BTN_Y_RATIO)
-            delay(MENU_DELAY_MS)
-
-            // 2. 点击菜单中的“视频通话”
-            val videoCallHit = findAndTapText("视频通话") ?: return false
-            Log.d(TAG, "点击视频通话: ${videoCallHit.text}")
-            delay(PAGE_DELAY_MS)
-
-            // 3. 点击“语音通话”或“视频通话”
-            val targetText = if (useVoice) "语音通话" else "视频通话"
-            val callHit = findAndTapText(targetText)
-            if (callHit != null) {
-                Log.d(TAG, "点击$targetText 成功")
-                true
-            } else {
-                // 可能默认就是语音通话，已自动发起？或界面无这两个按钮
-                Log.w(TAG, "未找到 $targetText，可能已直接发起")
-                true // 保守返回 true
+        // 执行操作（直接复用已有 Flow）
+        when (pending.action) {
+            "voice" -> {
+                voiceFlow.sendVoiceMessage()          // 复用已有语音发送
+                "已给${pending.target}发语音"
             }
-        } catch (e: Exception) {
-            Log.e(TAG, "通话发起失败: ${e.message}")
-            false
-        }
-    }
-
-    /**
-     * 在当前屏幕截图中查找包含 [targetText] 的 OCR 行，并点击其中心。
-     * 搜索区域为屏幕下半部分（CROP_TOP_RATIO 以下）。
-     * @return 命中的 OcrLine，失败返回 null
-     */
-    private suspend fun findAndTapText(targetText: String): OcrLine? {
-        val fullBitmap = screenshotProvider.capture() ?: return null
-        val width = fullBitmap.width
-        val height = fullBitmap.height
-        val cropTop = (height * CROP_TOP_RATIO).toInt()
-        val cropBitmap = android.graphics.Bitmap.createBitmap(fullBitmap, 0, cropTop, width, height - cropTop)
-
-        val ocrResult = ocrEngine.recognize(cropBitmap)
-        cropBitmap.recycle()
-
-        val lines = extractLinesFromText(ocrResult)
-
-        // 按相似度排序，取最高且 ≥ 阈值的行
-        val bestLine = lines
-            .map { line -> line to computeSimilarity(line.text, targetText) }
-            .filter { it.second >= MATCH_THRESHOLD }
-            .maxByOrNull { it.second }
-
-        if (bestLine != null) {
-            val (line, _) = bestLine
-            // 坐标需还原到全屏坐标系（裁剪偏移量 cropTop）
-            val adjustedRect = Rect(
-                line.bounds.left,
-                line.bounds.top + cropTop,
-                line.bounds.right,
-                line.bounds.bottom + cropTop
-            )
-            val clickX = adjustedRect.centerX()
-            val clickY = adjustedRect.centerY()
-            input.tapByCoordinate(clickX, clickY)
-            return line
-        }
-        return null
-    }
-
-    /**
-     * 从 ML Kit 识别结果中提取行（适配你的 OCR 返回类型）
-     */
-    private fun extractLinesFromText(ocrResult: Any): List<OcrLine> {
-        // 如果你的 ocrEngine.recognize() 直接返回 List<OcrLine>，则直接返回
-        if (ocrResult is List<*>) {
-            @Suppress("UNCHECKED_CAST")
-            return (ocrResult as? List<OcrLine>) ?: emptyList()
-        }
-        // 如果返回的是 ML Kit Text 对象，则调用 OcrLineMatcher.extractLines()
-        return try {
-            com.example.wechat_senior_helper.ocr.OcrLineMatcher.extractLines(ocrResult as com.google.mlkit.vision.text.Text)
-        } catch (e: Exception) {
-            Log.e(TAG, "提取 OCR 行失败: ${e.message}")
-            emptyList()
-        }
-    }
-
-    /**
-     * 简单 Levenshtein 相似度（0~1），复用项目已有工具更佳
-     */
-    private fun computeSimilarity(s1: String, s2: String): Float {
-        val maxLen = maxOf(s1.length, s2.length)
-        if (maxLen == 0) return 1f
-        val distance = levenshteinDistance(s1, s2)
-        return 1f - distance.toFloat() / maxLen
-    }
-
-    private fun levenshteinDistance(a: String, b: String): Int {
-        val costs = IntArray(b.length + 1)
-        for (i in 0..b.length) costs[i] = i
-        for (i in 1..a.length) {
-            var last = i - 1
-            costs[0] = i
-            for (j in 1..b.length) {
-                val temp = costs[j]
-                costs[j] = if (a[i - 1] == b[j - 1]) last
-                else 1 + minOf(minOf(costs[j], costs[j - 1]), last)
-                last = temp
+            "video" -> {
+                videoCallFlow.makeCall(useVoice = true) // 复用已有通话发起
+                "已发起和${pending.target}的语音通话"
             }
+            else -> "不支持的操作"
         }
-        return costs[b.length]
+    } catch (e: Exception) {
+        Log.e(TAG, "执行失败", e)
+        "执行失败，请重试"
     }
 }
 ```
 
----
+> 此处 `voiceFlow` 和 `videoCallFlow` 就是之前实现的 `WeChatVoiceFlow` 和 `WeChatVideoCallFlow` 的实例，完全复用。
 
-### 2. 修改 `CoordinateInputHelper`（若尚未有 `tapByCoordinate`）
-确保工具类支持绝对坐标点击：
+### 2. 关键词直接执行也走相同路径
+
 ```kotlin
-// 在 CoordinateInputHelper 中添加
-fun tapByCoordinate(x: Int, y: Int) {
-    tap(x, y)  // 假设已有 tap(x, y) 方法
-}
-```
-
----
-
-### 3. 在 `WeChatAssistAccessibilityService` 中初始化
-```kotlin
-// 添加字段
-private lateinit var videoCallFlow: WeChatVideoCallFlow
-
-// 在 onServiceConnected 中初始化（已有 screenshotProvider 和 ocrEngine）
-videoCallFlow = WeChatVideoCallFlow(
-    input = inputHelper,
-    screenshotProvider = screenshotProvider,
-    ocrEngine = mlKitOcrEngine  // 你的 OCR 引擎实例
-)
-
-// 公开调用方法
-fun requestVideoCall(useVoice: Boolean = true) {
-    Log.e(TAG, "[VIDEO_CALL] useVoice=$useVoice")
-    if (!busy.compareAndSet(false, true)) {
-        Log.w(TAG, "[BUSY] 上次操作未完成")
-        return
+// 关键词匹配时直接调用的辅助方法
+private suspend fun sendVoiceTo(name: String, durationMs: Long) {
+    val ok = chatNavGuard.ensureChatWithTarget(name)
+    if (ok) {
+        voiceFlow.sendVoiceMessage(durationMs)   // 复用
     }
-    scope.launch {
-        try {
-            val ok = videoCallFlow.makeCall(useVoice)
-            Log.e(TAG, "[VIDEO_CALL] result=$ok")
-        } catch (t: Throwable) {
-            Log.e(TAG, "[VIDEO_CALL_FAIL] ${t.message}", t)
-        } finally {
-            busy.set(false)
-        }
+}
+
+private suspend fun makeVideoCall(useVoice: Boolean, name: String) {
+    val ok = chatNavGuard.ensureChatWithTarget(name)
+    if (ok) {
+        videoCallFlow.makeCall(useVoice)         // 复用
     }
 }
 ```
 
----
+> 关键词匹配时直接传入从输入中提取的 target（如“给儿子发语音”提取“儿子”）。
 
-### 4. 悬浮窗添加测试按钮（可选）
-参考语音按钮的添加方式，在 `floating_ball_layout.xml` 增加：
-```xml
-<Button
-    android:id="@+id/btn_video_call"
-    android:layout_width="wrap_content"
-    android:layout_height="36dp"
-    android:text="语音通话"
-    android:textSize="12sp"
-    android:minWidth="100dp"
-    android:layout_marginBottom="4dp" />
-```
-在 `FloatingBallService` 中绑定：
-```kotlin
-btnVideoCall?.setOnClickListener {
-    if (isExecuting) return@setOnClickListener
-    val service = AccessibilityServiceStateManager.instance ?: return@setOnClickListener
-    isExecuting = true
-    updateStatus("发起语音通话...")
-    hideFloatingBall()
-    service.requestVideoCall(true)  // 语音通话
-    serviceScope.launch {
-        delay(6000) // 留足时间
-        isExecuting = false
-        showFloatingBall()
-        updateStatus("就绪")
-    }
-}
-```
+### 3. `ChatNavigationGuard.ensureChatWithTarget()` 内部复用搜索 Flow
+
+已在之前实现中调用 `searchFlow.execute(targetName)`，确认无误。
 
 ---
 
-### 5. 坐标微调参考
-| 元素 | 默认比例 | 说明 |
-|------|----------|------|
-| 加号按钮 | (0.95, 0.93) | 输入框右侧，y 可随键盘弹出微调；若无效可改为 (0.94, 0.92) 或通过指针位置实测 |
-| 菜单裁剪区 | 0.4 ~ 1.0 | 覆盖屏幕下半部分，确保“视频通话”出现。若菜单较短，可改为 0.3 |
-| 匹配阈值 | 0.75 | OCR 识别“视频通话”准确率很高，0.75 足够过滤错误 |
+## 二、悬浮窗“搜索联系人”按钮也能复用
 
-### 6. 注意事项
-- **OCR 识别类型**：`extractLinesFromText` 方法根据你的 `ocrEngine.recognize()` 实际返回类型做了分支处理。如果返回的是 `List<OcrLine>`，则直接强转；如果是 ML Kit 的 `Text`，则调用 `OcrLineMatcher.extractLines()`。请根据你的项目选择保留一个分支。
-- **截图回收**：裁剪的 `Bitmap` 使用后立即 `recycle()`，避免内存泄漏。
-- **相似度算法**：手写了 Levenshtein 距离，若项目已有统一工具类，可替换为其方法，减少重复代码。
-- **失败处理**：如果最后一步未找到“语音通话”按钮，仍返回 `true`，因为某些微信版本点击“视频通话”后可能直接发起语音通话。
+如果希望悬浮窗的“搜索联系人”按钮也走这个统一路径，可以将其点击事件改为调用 `chatNavGuard.ensureChatWithTarget(name)`，而非直接 `searchFlow.execute`。这样也能享受“自动开微信+回首页”的好处。但原有独立按钮仍然可用，取决于你的选择。
 
-### 7. 流程验证
-1. 打开任意聊天界面。
-2. 触发 `requestVideoCall(true)`，日志应显示：点击加号 → 找到并点击“视频通话” → 找到并点击“语音通话”。
-3. 观察微信是否成功发起语音通话。
+---
 
-完整实现后，你的自动化助手将支持：搜索联系人、发送文本、发送语音、发起语音/视频通话，只需在聊天界面一键触发。
+## 三、最终检查清单
+
+| 功能 | 复用的模块 | 备注 |
+|------|------------|------|
+| 打开微信 | `WeChatLauncher` (新增工具类) | 仅用于启动微信，不包含操作逻辑 |
+| 返回首页 | `ChatNavigationGuard.goToHome()` | 通过连续按返回键实现，已存在 |
+| 搜索联系人 | `WeChatSearchContactFlow.execute()` | 完全复用 |
+| 发送语音 | `WeChatVoiceFlow.sendVoiceMessage()` | 完全复用 |
+| 发起通话 | `WeChatVideoCallFlow.makeCall()` | 完全复用 |
+| 聊天对象检测 | `ChatNavigationGuard.isCorrectChat()` | 顶部 OCR 匹配，已存在 |
+| 语音模式检测 | `WeChatVoiceFlow.isVoiceModeActive()` | 底部 OCR 检测“按住说话”，已存在 |
+
+**无需新增任何业务逻辑类，只需调整调用链，让意图识别的结果汇入现有执行器即可。**
+
+---
+
+## 四、代码改动总结
+
+仅需修改两个文件的少量内容：
+
+1. **`IntentHandler.kt`**  
+   - `executeConfirmed` 中先调 `ensureChatWithTarget`，再调对应 Flow。  
+   - 关键词动作辅助方法（如 `sendVoiceTo`）同样先导航再调 Flow。  
+   - （可选）从用户输入中提取联系人的逻辑保持不变。
+
+2. **`ChatNavigationGuard.kt`**  
+   - 加入 `WeChatLauncher.launchWeChat` 和前台检测，确保在微信内。  
+   - 修改构造函数接受 `Context` 和 `isWeChatForeground` 回调（如之前指南）。  
+   - `ensureChatWithTarget` 起始处增加微信前台判断。
+
+其余文件（`WeChatVoiceFlow`、`WeChatVideoCallFlow`、`WeChatSearchContactFlow` 等）**完全不动**。
+
+这样，整个意图识别体系就建立在了已有稳定功能之上，没有任何重复实现。

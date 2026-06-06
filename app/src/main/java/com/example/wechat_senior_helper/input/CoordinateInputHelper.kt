@@ -43,6 +43,20 @@ class CoordinateInputHelper(
         scheduleRemoval()
     }
 
+    /** 绝对像素坐标点击，用于 OCR 定位后的精确点击 */
+    suspend fun tapByCoordinate(x: Int, y: Int) {
+        Log.e(TAG, "[TAP_COORD] pixel=($x, $y)")
+        showIndicator(x, y)
+        dispatchGesture(x, y, 50L)
+        scheduleRemoval()
+    }
+
+    /** 全局返回键 */
+    fun pressBack() {
+        val ok = service.performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK)
+        Log.e(TAG, "[BACK] result=$ok")
+    }
+
     suspend fun longPressByRatio(xRatio: Float, yRatio: Float, durationMs: Long = 600) {
         val x = (screenWidth * xRatio).toInt()
         val y = (screenHeight * yRatio).toInt()

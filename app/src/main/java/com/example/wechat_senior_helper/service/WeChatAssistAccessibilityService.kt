@@ -12,6 +12,9 @@ import android.util.Log
 import android.view.accessibility.AccessibilityEvent
 import com.example.wechat_senior_helper.flow.WeChatChatReadFlow
 import com.example.wechat_senior_helper.flow.WeChatSearchContactFlow
+import com.example.wechat_senior_helper.flow.ChatNavigationGuard
+import com.example.wechat_senior_helper.flow.IntentHandler
+import com.example.wechat_senior_helper.flow.WeChatVideoCallFlow
 import com.example.wechat_senior_helper.flow.WeChatVoiceFlow
 import com.example.wechat_senior_helper.input.CoordinateInputHelper
 import com.example.wechat_senior_helper.ocr.AccessibilityScreenshotProvider
@@ -53,6 +56,9 @@ class WeChatAssistAccessibilityService : AccessibilityService() {
     private lateinit var searchFlow: WeChatSearchContactFlow
     private lateinit var chatReadFlow: WeChatChatReadFlow
     private lateinit var voiceFlow: WeChatVoiceFlow
+    private lateinit var videoCallFlow: WeChatVideoCallFlow
+    private lateinit var chatNavGuard: ChatNavigationGuard
+    private lateinit var intentHandler: IntentHandler
 
     override fun onServiceConnected() {
         super.onServiceConnected()
@@ -90,6 +96,29 @@ class WeChatAssistAccessibilityService : AccessibilityService() {
             input = inputHelper,
             screenshotProvider = screenshotProvider,
             ocrEngine = ocrEngine
+        )
+
+        videoCallFlow = WeChatVideoCallFlow(
+            input = inputHelper,
+            screenshotProvider = screenshotProvider,
+            ocrEngine = ocrEngine
+        )
+
+        chatNavGuard = ChatNavigationGuard(
+            input = inputHelper,
+            screenshotProvider = screenshotProvider,
+            ocrEngine = ocrEngine,
+            searchContact = { name -> searchFlow.execute(name) },
+            context = this,
+            isWeChatForeground = { isWeChatForeground() }
+        )
+
+        intentHandler = IntentHandler(
+            searchFlow = searchFlow,
+            voiceFlow = voiceFlow,
+            videoCallFlow = videoCallFlow,
+            chatNavGuard = chatNavGuard,
+            appContext = applicationContext
         )
 
         Log.e(TAG, "========================================")
@@ -154,6 +183,50 @@ class WeChatAssistAccessibilityService : AccessibilityService() {
     /**
      * 组合流程：搜索联系人→进入聊天→发送语音
      */
+    fun requestVideoCall(useVoice: Boolean = true) {
+        Log.e(TAG, "[VIDEO_CALL] useVoice=$useVoice")
+        if (!busy.compareAndSet(false, true)) {
+            Log.w(TAG, "[BUSY] 上次操作未完成")
+            return
+        }
+        scope.launch {
+            try {
+                val ok = videoCallFlow.makeCall(useVoice)
+                Log.e(TAG, "[VIDEO_CALL] result=$ok")
+            } catch (t: Throwable) {
+                Log.e(TAG, "[VIDEO_CALL_FAIL] ${t.message}", t)
+            } finally {
+                busy.set(false)
+            }
+        }
+    }
+
+    fun ensureTargetChat(targetName: String) {
+        Log.e(TAG, "[NAV] ensureTargetChat: $targetName")
+        if (!busy.compareAndSet(false, true)) {
+            Log.w(TAG, "[BUSY] 上次操作未完成")
+            return
+        }
+        scope.launch {
+            try {
+                val ok = chatNavGuard.ensureChatWithTarget(targetName)
+                Log.e(TAG, "[NAV] result=$ok")
+            } catch (t: Throwable) {
+                Log.e(TAG, "[NAV_FAIL] ${t.message}", t)
+            } finally {
+                busy.set(false)
+            }
+        }
+    }
+
+    suspend fun handleIntent(text: String): IntentHandler.HandleResult {
+        return intentHandler.handle(text)
+    }
+
+    suspend fun confirmAction(pending: IntentHandler.PendingAction): String {
+        return intentHandler.executeConfirmed(pending)
+    }
+
     fun requestSearchThenVoice(contactName: String, voiceDurationMs: Long = 3000L) {
         Log.e(TAG, "[SEARCH_VOICE] contactName=$contactName voiceDurationMs=$voiceDurationMs")
         if (!busy.compareAndSet(false, true)) {
@@ -193,6 +266,12 @@ class WeChatAssistAccessibilityService : AccessibilityService() {
         Log.d(TAG, "无障碍服务已销毁")
         AccessibilityServiceStateManager.setInstance(null)
         AccessibilityServiceStateManager.updateStatus(AccessibilityServiceStateManager.ServiceStatus.DISABLED)
+    }
+
+    // ===================== 微信前台检测 =====================
+    private fun isWeChatForeground(): Boolean {
+        val root = rootInActiveWindow ?: return false
+        return root.packageName == "com.tencent.mm"
     }
 
     // ===================== 手势/坐标操作 =====================
