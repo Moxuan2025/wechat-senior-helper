@@ -52,8 +52,9 @@ dependencies {
     implementation(libs.kotlinx.coroutines.core)
     implementation(libs.kotlinx.coroutines.android)
     
-    // ML Kit for OCR text recognition
-    implementation("com.google.mlkit:text-recognition-chinese:16.0.0")
+    // ML Kit for OCR text recognition (bundled Chinese model)
+    implementation("com.google.mlkit:text-recognition:16.0.1")
+    implementation("com.google.mlkit:text-recognition-chinese:16.0.1")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-play-services:1.7.3")
     
     testImplementation(libs.junit)

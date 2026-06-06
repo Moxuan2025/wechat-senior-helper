@@ -1,5 +1,4 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Floating Ball Layout - Overlay control for WeChat automation -->
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="wrap_content"
     android:layout_height="wrap_content"
@@ -8,7 +7,6 @@
     android:padding="8dp"
     android:elevation="8dp">
 
-    <!-- Status Text -->
     <TextView
         android:id="@+id/tv_status"
         android:layout_width="wrap_content"
@@ -19,37 +17,62 @@
         android:layout_gravity="center_horizontal"
         android:layout_marginBottom="8dp" />
 
-    <!-- Open WeChat Button -->
+    <EditText
+        android:id="@+id/et_search_contact"
+        android:layout_width="wrap_content"
+        android:layout_height="36dp"
+        android:hint="输入联系人名"
+        android:textSize="12sp"
+        android:minWidth="120dp"
+        android:background="#FFFFFF"
+        android:paddingLeft="4dp"
+        android:textColor="#000000"
+        android:textColorHint="#888888"
+        android:layout_marginBottom="4dp" />
+
+    <Button
+        android:id="@+id/btn_search_contact"
+        android:layout_width="wrap_content"
+        android:layout_height="36dp"
+        android:text="搜索联系人"
+        android:textSize="12sp"
+        android:minWidth="100dp"
+        android:layout_marginBottom="4dp" />
+
     <Button
         android:id="@+id/btn_open_wechat"
         android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
+        android:layout_height="36dp"
         android:text="打开微信"
         android:textSize="12sp"
         android:minWidth="100dp"
-        android:minHeight="36dp"
         android:layout_marginBottom="4dp" />
 
-    <!-- Execute Transaction Button -->
     <Button
         android:id="@+id/btn_execute_tx"
         android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:text="执行事务"
+        android:layout_height="36dp"
+        android:text="返回事务"
         android:textSize="12sp"
         android:minWidth="100dp"
-        android:minHeight="36dp"
         android:layout_marginBottom="4dp" />
 
-    <!-- Stop Service Button -->
+    <Button
+        android:id="@+id/btn_send_voice"
+        android:layout_width="wrap_content"
+        android:layout_height="36dp"
+        android:text="发送语音"
+        android:textSize="12sp"
+        android:minWidth="100dp"
+        android:layout_marginBottom="4dp" />
+
     <Button
         android:id="@+id/btn_stop"
         android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
+        android:layout_height="36dp"
         android:text="停止服务"
         android:textSize="12sp"
         android:minWidth="100dp"
-        android:minHeight="36dp"
         android:backgroundTint="#FF5252" />
 
 </LinearLayout>

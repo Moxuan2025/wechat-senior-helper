@@ -1,17 +1,32 @@
 package com.example.wechat_senior_helper.service
 
 import android.accessibilityservice.AccessibilityService
-import android.content.Intent
+import android.accessibilityservice.AccessibilityServiceInfo
+import android.accessibilityservice.GestureDescription
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
+import android.graphics.Path
+import android.os.Build
 import android.util.Log
 import android.view.accessibility.AccessibilityEvent
-import android.view.accessibility.AccessibilityNodeInfo
-import com.example.wechat_senior_helper.utils.WeChatPageDetector
-import java.util.ArrayDeque
+import com.example.wechat_senior_helper.flow.WeChatChatReadFlow
+import com.example.wechat_senior_helper.flow.WeChatSearchContactFlow
+import com.example.wechat_senior_helper.flow.WeChatVoiceFlow
+import com.example.wechat_senior_helper.input.CoordinateInputHelper
+import com.example.wechat_senior_helper.ocr.AccessibilityScreenshotProvider
+import com.example.wechat_senior_helper.ocr.MlKitOcrEngine
+import com.example.wechat_senior_helper.ocr.WechatScreenAnalyzer
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 
-/**
- * 微信老年助手无障碍服务
- * 用于识别当前窗口、打印节点树、执行点击/回退/滑动等基础动作
- */
 class WeChatAssistAccessibilityService : AccessibilityService() {
 
     companion object {
@@ -22,163 +37,148 @@ class WeChatAssistAccessibilityService : AccessibilityService() {
             get() = AccessibilityServiceStateManager.instance
     }
 
-    private var lastClickedTab: String? = null
+    // ===================== 坐标参数 =====================
+    private val SEARCH_ICON_X_RATIO = 0.86f
+    private val SEARCH_ICON_Y_RATIO = 0.055f
+    private val PASTE_MENU_X_RATIO = 0.12f
+    private val PASTE_MENU_Y_RATIO = 0.14f
+
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    private val busy = AtomicBoolean(false)
+
+    private lateinit var screenshotProvider: AccessibilityScreenshotProvider
+    private lateinit var ocrEngine: MlKitOcrEngine
+    private lateinit var analyzer: WechatScreenAnalyzer
+    private lateinit var inputHelper: CoordinateInputHelper
+    private lateinit var searchFlow: WeChatSearchContactFlow
+    private lateinit var chatReadFlow: WeChatChatReadFlow
+    private lateinit var voiceFlow: WeChatVoiceFlow
 
     override fun onServiceConnected() {
         super.onServiceConnected()
+
+        serviceInfo = serviceInfo.apply {
+            flags = flags or AccessibilityServiceInfo.FLAG_RETRIEVE_INTERACTIVE_WINDOWS
+        }
+
         AccessibilityServiceStateManager.setInstance(this)
         AccessibilityServiceStateManager.updateStatus(AccessibilityServiceStateManager.ServiceStatus.CONNECTED)
+
+        val dm = resources.displayMetrics
+        screenshotProvider = AccessibilityScreenshotProvider(this)
+        ocrEngine = MlKitOcrEngine()
+        analyzer = WechatScreenAnalyzer(ocrEngine)
+        inputHelper = CoordinateInputHelper(this, dm.widthPixels, dm.heightPixels)
+
+        searchFlow = WeChatSearchContactFlow(
+            screenshotProvider = screenshotProvider,
+            analyzer = analyzer,
+            input = inputHelper,
+            pasteMenuXRatio = PASTE_MENU_X_RATIO,
+            pasteMenuYRatio = PASTE_MENU_Y_RATIO,
+            setClipboardText = { text -> setClipboardText(text) },
+            tap = { x, y -> dispatchTap(x, y) },
+            clickSearchIconByPosition = { clickSearchIconByPosition() }
+        )
+
+        chatReadFlow = WeChatChatReadFlow(
+            screenshotProvider = screenshotProvider,
+            analyzer = analyzer
+        )
+
+        voiceFlow = WeChatVoiceFlow(
+            input = inputHelper,
+            screenshotProvider = screenshotProvider,
+            ocrEngine = ocrEngine
+        )
+
         Log.e(TAG, "========================================")
-        Log.e(TAG, "无障碍服务已连接！")
+        Log.e(TAG, "无障碍服务已连接！(纯坐标输入模式)")
+        Log.e(TAG, "粘贴菜单坐标: x=$PASTE_MENU_X_RATIO, y=$PASTE_MENU_Y_RATIO")
         Log.e(TAG, "服务类名: ${this.javaClass.name}")
-        Log.e(TAG, "包名: ${packageName}")
+        Log.e(TAG, "包名: $packageName")
         Log.e(TAG, "========================================")
     }
 
-    override fun onAccessibilityEvent(event: AccessibilityEvent?) {
-        if (event == null) {
-            Log.w(TAG, "收到空事件")
+    // ===================== 公开入口 =====================
+    fun requestWechatSearch(contactName: String) {
+        Log.e(TAG, "[REQUEST] contactName=$contactName")
+        if (!busy.compareAndSet(false, true)) {
+            Log.w(TAG, "[BUSY] 上一次操作尚未完成")
             return
         }
-
-        Log.d(TAG, "收到事件类型: ${eventTypeToString(event.eventType)}")
-        Log.d(TAG, "事件包名: ${event.packageName}")
-        Log.d(TAG, "事件类名: ${event.className}")
-
-        when (event.eventType) {
-            AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED -> {
-                handleWindowStateChanged(event)
-            }
-            AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED -> {
-                handleWindowContentChanged(event)
-            }
-            AccessibilityEvent.TYPE_VIEW_CLICKED -> {
-                handleViewClicked(event)
-            }
-            else -> {
-                // 其他事件忽略
+        scope.launch {
+            try {
+                val ok = searchFlow.execute(contactName)
+                Log.e(TAG, "[FLOW_OCR] result=$ok")
+            } catch (t: Throwable) {
+                Log.e(TAG, "[FLOW_OCR_FAIL] ${t.message}", t)
+            } finally {
+                busy.set(false)
             }
         }
     }
 
-    private fun eventTypeToString(eventType: Int): String {
-        return when (eventType) {
-            AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED -> "TYPE_WINDOW_STATE_CHANGED"
-            AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED -> "TYPE_WINDOW_CONTENT_CHANGED"
-            AccessibilityEvent.TYPE_VIEW_CLICKED -> "TYPE_VIEW_CLICKED"
-            AccessibilityEvent.TYPE_VIEW_SCROLLED -> "TYPE_VIEW_SCROLLED"
-            else -> "UNKNOWN($eventType)"
-        }
-    }
-
-    private fun handleWindowStateChanged(event: AccessibilityEvent) {
-        val packageName = event.packageName?.toString() ?: ""
-        val className = event.className?.toString() ?: ""
-
-        Log.d(TAG, "========== 窗口状态变化 ==========")
-        Log.d(TAG, "包名: $packageName")
-        Log.d(TAG, "类名: $className")
-        Log.d(TAG, "事件时间: ${System.currentTimeMillis()}")
-
-        if (packageName != "com.tencent.mm") return
-
-        postDelayed({
-            val root = rootInActiveWindow
-            if (root == null) {
-                Log.w(TAG, "rootInActiveWindow 为空，只靠 className 尝试判断")
-                val type = WeChatPageDetector.detectPageTypeByClassName(className)
-                Log.e(TAG, "📱 页面识别结果（仅className）: ${type.name}")
-                return@postDelayed
+    fun requestReadVisibleChat(onResult: (List<String>) -> Unit) {
+        if (!busy.compareAndSet(false, true)) return
+        scope.launch {
+            try {
+                val result = chatReadFlow.readVisibleChat()
+                onResult(result)
+            } catch (t: Throwable) {
+                Log.e(TAG, "[CHAT_READ_FAIL] ${t.message}", t)
+            } finally {
+                busy.set(false)
             }
-
-            val type = WeChatPageDetector.detectPageType(className, root)
-            Log.e(TAG, "📱 页面识别结果: ${type.name}（className=${className}）")
-
-            root.recycle()
-        }, 300)
-    }
-
-    private fun handleViewClicked(event: AccessibilityEvent) {
-        if (event.packageName != "com.tencent.mm") return
-
-        val clickedText = event.text?.joinToString("")?.trim()
-        if (clickedText.isNullOrEmpty()) return
-
-        val tabNames = listOf("微信", "通讯录", "发现", "我")
-        if (clickedText in tabNames) {
-            lastClickedTab = clickedText
-            Log.d(TAG, "点击了底部Tab: $clickedText")
         }
     }
 
-    private fun handleWindowContentChanged(event: AccessibilityEvent) {
-        if (event.packageName != "com.tencent.mm") return
+    fun requestSendVoice(durationMs: Long = 2000L) {
+        Log.e(TAG, "[VOICE] durationMs=$durationMs")
+        if (!busy.compareAndSet(false, true)) {
+            Log.w(TAG, "[BUSY] 上一次操作尚未完成")
+            return
+        }
+        scope.launch {
+            try {
+                val ok = voiceFlow.sendVoiceMessage(durationMs)
+                Log.e(TAG, "[VOICE] result=$ok")
+            } catch (t: Throwable) {
+                Log.e(TAG, "[VOICE_FAIL] ${t.message}", t)
+            } finally {
+                busy.set(false)
+            }
+        }
+    }
 
-        postDelayed({
-            val tab = lastClickedTab
-            if (tab != null) {
-                val type = when (tab) {
-                    "微信" -> WeChatPageDetector.PageType.WECHAT_HOME
-                    "通讯录" -> WeChatPageDetector.PageType.CONTACTS
-                    "发现" -> WeChatPageDetector.PageType.DISCOVER
-                    "我" -> WeChatPageDetector.PageType.ME
-                    else -> null
+    /**
+     * 组合流程：搜索联系人→进入聊天→发送语音
+     */
+    fun requestSearchThenVoice(contactName: String, voiceDurationMs: Long = 3000L) {
+        Log.e(TAG, "[SEARCH_VOICE] contactName=$contactName voiceDurationMs=$voiceDurationMs")
+        if (!busy.compareAndSet(false, true)) {
+            Log.w(TAG, "[BUSY] 上一次操作尚未完成")
+            return
+        }
+        scope.launch {
+            try {
+                val searchOk = searchFlow.execute(contactName)
+                if (!searchOk) {
+                    Log.e(TAG, "[SEARCH_VOICE] search failed")
+                    return@launch
                 }
-                if (type != null) {
-                    Log.e(TAG, "📱 CONTENT_CHANGED 推断页面: ${type.name}（上次点击Tab: $tab）")
-                    lastClickedTab = null
-                    return@postDelayed
-                }
-            }
-
-            // 兜底：检测是否为聊天详情页（有 EditText 或发送按钮）
-            val root = rootInActiveWindow ?: return@postDelayed
-            val isChat = checkIsChatPage(root)
-            root.recycle()
-
-            if (isChat) {
-                Log.e(TAG, "📱 CONTENT_CHANGED 识别为聊天页面: CHAT_DETAIL")
-            } else {
-                Log.d(TAG, "CONTENT_CHANGED 未识别Tab且无聊天特征，忽略")
-            }
-        }, 200)
-    }
-
-    private fun checkIsChatPage(root: AccessibilityNodeInfo): Boolean {
-        val queue = ArrayDeque<AccessibilityNodeInfo>()
-        queue.add(root)
-        var foundEditText = false
-        var foundSendButton = false
-
-        while (queue.isNotEmpty()) {
-            val node = queue.removeFirst()
-
-            val className = node.className?.toString() ?: ""
-            if (className.contains("EditText", ignoreCase = true)) {
-                foundEditText = true
-            }
-
-            val text = node.text?.toString() ?: ""
-            if (text.contains("发送", ignoreCase = true)) {
-                foundSendButton = true
-            }
-
-            val desc = node.contentDescription?.toString() ?: ""
-            if (desc.contains("输入框", ignoreCase = true)) {
-                foundEditText = true
-            }
-
-            for (i in 0 until node.childCount) {
-                node.getChild(i)?.let { queue.add(it) }
+                delay(800) // 等待聊天界面完全加载
+                voiceFlow.sendVoiceMessage(voiceDurationMs)
+                Log.e(TAG, "[SEARCH_VOICE] done")
+            } catch (t: Throwable) {
+                Log.e(TAG, "[SEARCH_VOICE_FAIL] ${t.message}", t)
+            } finally {
+                busy.set(false)
             }
         }
-
-        return foundEditText || foundSendButton
     }
 
-    private fun postDelayed(action: () -> Unit, delayMillis: Long) {
-        android.os.Handler(mainLooper).postDelayed(action, delayMillis)
-    }
+    override fun onAccessibilityEvent(event: AccessibilityEvent?) = Unit
 
     override fun onInterrupt() {
         Log.w(TAG, "无障碍服务被中断")
@@ -188,19 +188,62 @@ class WeChatAssistAccessibilityService : AccessibilityService() {
 
     override fun onDestroy() {
         super.onDestroy()
+        scope.cancel()
+        if (::ocrEngine.isInitialized) ocrEngine.close()
         Log.d(TAG, "无障碍服务已销毁")
         AccessibilityServiceStateManager.setInstance(null)
         AccessibilityServiceStateManager.updateStatus(AccessibilityServiceStateManager.ServiceStatus.DISABLED)
     }
 
-    fun getRootNodeWithRetry(retryCount: Int = 3): AccessibilityNodeInfo? {
-        for (i in 1..retryCount) {
-            val root = rootInActiveWindow
-            if (root != null) return root
-            Log.w(TAG, "第 $i 次尝试获取 root 节点失败")
-            Thread.sleep(200)
+    // ===================== 手势/坐标操作 =====================
+    private fun dispatchTap(x: Int, y: Int, durationMs: Long = 50L) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+            try {
+                val path = Path().apply {
+                    moveTo(x.toFloat(), y.toFloat())
+                }
+                val stroke = GestureDescription.StrokeDescription(path, 0, durationMs)
+                val gesture = GestureDescription.Builder()
+                    .addStroke(stroke)
+                    .build()
+
+                val latch = CountDownLatch(1)
+                dispatchGesture(gesture, object : GestureResultCallback() {
+                    override fun onCompleted(gestureDescription: GestureDescription?) {
+                        super.onCompleted(gestureDescription)
+                        latch.countDown()
+                    }
+
+                    override fun onCancelled(gestureDescription: GestureDescription?) {
+                        super.onCancelled(gestureDescription)
+                        latch.countDown()
+                    }
+                }, null)
+                latch.await(300, TimeUnit.MILLISECONDS)
+            } catch (t: Throwable) {
+                Log.e(TAG, "[GESTURE_FAIL] ${t.message}")
+            }
+        } else {
+            Log.e(TAG, "[TAP_SKIP] gesture not supported on SDK ${Build.VERSION.SDK_INT}")
         }
-        Log.e(TAG, "多次尝试后仍无法获取 root 节点")
-        return null
     }
+
+    private fun setClipboardText(text: String) {
+        try {
+            val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+            clipboard.setPrimaryClip(ClipData.newPlainText("wechat_search", text))
+            Log.e(TAG, "[CLIPBOARD] text ready for paste")
+        } catch (t: Throwable) {
+            Log.e(TAG, "[CLIPBOARD_FAIL] ${t.message}")
+        }
+    }
+
+    private fun clickSearchIconByPosition() {
+        val dm = resources.displayMetrics
+        val x = (dm.widthPixels * SEARCH_ICON_X_RATIO).toInt()
+        val y = (dm.heightPixels * SEARCH_ICON_Y_RATIO).toInt()
+        Log.e(TAG, "[TAP] searchIcon x=$x y=$y")
+        dispatchTap(x, y)
+    }
+
 }
