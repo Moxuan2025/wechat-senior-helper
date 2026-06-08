@@ -1,123 +1,304 @@
-### 整合指南：意图识别完全复用现有功能
+按这两个点改。
 
-现有模块已经完全具备**搜索联系人、发送语音、发起通话**的能力，意图识别的执行端只需按顺序调用它们。思路如下：
+## 1）发送语音：直接复用测试按钮那条稳定路径
 
-```
-意图解析(关键词/LLM) → 得到 action + target
-   ↓
-【统一入口】ensureChatWithTarget(target)
-   ├─ 不在微信 → 启动微信并等待
-   ├─ 已在微信但非目标聊天 → 返回首页 → 调用 WeChatSearchContactFlow.execute(target)
-   └─ 已在目标聊天 → 直接跳过
-   ↓
-根据 action 执行：
-   ├─ voice  → WeChatVoiceFlow.sendVoiceMessage()
-   ├─ video  → WeChatVideoCallFlow.makeCall(useVoice)
-   └─ (可扩展)
-```
+不要再让正式语音流程自己做一套复杂监测。
+把正式入口改成和测试按钮一致：**只负责“进入聊天后直接长按录音”**。
 
-**关键点：没有任何新造的执行逻辑，全部复用已有 Flow。**
+### 改动点
 
----
-
-## 一、需要微调的代码（确保复用）
-
-### 1. `IntentHandler.executeConfirmed()` 确保调用已有 Flow
+把 `WeChatVoiceFlow.sendVoiceMessage()` 收窄成稳定执行版：
 
 ```kotlin
-// IntentHandler.kt
-suspend fun executeConfirmed(pending: PendingAction): String {
-    return try {
-        // 核心：导航到目标聊天（内部复用搜索 Flow）
-        val chatReady = chatNavGuard.ensureChatWithTarget(pending.target)
-        if (!chatReady) {
-            return "没有找到「${pending.target}」，请检查名字"
-        }
-
-        // 执行操作（直接复用已有 Flow）
-        when (pending.action) {
-            "voice" -> {
-                voiceFlow.sendVoiceMessage()          // 复用已有语音发送
-                "已给${pending.target}发语音"
-            }
-            "video" -> {
-                videoCallFlow.makeCall(useVoice = true) // 复用已有通话发起
-                "已发起和${pending.target}的语音通话"
-            }
-            else -> "不支持的操作"
-        }
-    } catch (e: Exception) {
-        Log.e(TAG, "执行失败", e)
-        "执行失败，请重试"
+class WeChatVoiceFlow(
+    private val input: InputController
+) {
+    suspend fun sendVoiceMessage(durationMs: Long = 2000L): Boolean {
+        // 这里不再做复杂监测，直接复用测试按钮的稳定执行方式
+        input.longPressByRatio(0.5f, 0.99f, durationMs)
+        return true
     }
 }
 ```
 
-> 此处 `voiceFlow` 和 `videoCallFlow` 就是之前实现的 `WeChatVoiceFlow` 和 `WeChatVideoCallFlow` 的实例，完全复用。
+### 语音模式判断只保留在“必要时”
 
-### 2. 关键词直接执行也走相同路径
+如果你还想保留一个轻量检查，只做一次即可，不要切来切去：
 
 ```kotlin
-// 关键词匹配时直接调用的辅助方法
-private suspend fun sendVoiceTo(name: String, durationMs: Long) {
-    val ok = chatNavGuard.ensureChatWithTarget(name)
-    if (ok) {
-        voiceFlow.sendVoiceMessage(durationMs)   // 复用
-    }
+suspend fun ensureVoiceModeIfNeeded(): Boolean {
+    return isVoiceModeActive() || switchToVoiceMode()
+}
+```
+
+然后正式流程里：
+
+```kotlin
+if (!voiceFlow.ensureVoiceModeIfNeeded()) return false
+delay(200)
+voiceFlow.sendVoiceMessage()
+```
+
+### 关键原则
+
+你已经验证过 `requestSendVoice(2000L)` 这条链是稳定的，就让正式流程走同一条逻辑，不再加额外状态推断。
+
+---
+
+## 2）打电话：明确区分“语音电话 / 视频电话 / 只说打电话”
+
+### 规则
+
+* 说了“语音电话” → 直接 `AUDIO`
+* 说了“视频电话” → 直接 `VIDEO`
+* 只说“打电话” → **先确认**，不要直接执行
+
+---
+
+## 3）动作类型加一个“待确认模式”
+
+### 修改数据结构
+
+```kotlin
+enum class CallMode {
+    AUDIO,
+    VIDEO,
+    UNKNOWN
 }
 
-private suspend fun makeVideoCall(useVoice: Boolean, name: String) {
-    val ok = chatNavGuard.ensureChatWithTarget(name)
-    if (ok) {
-        videoCallFlow.makeCall(useVoice)         // 复用
+sealed class PendingAction {
+    data class Voice(val target: String) : PendingAction()
+    data class Call(val target: String, val mode: CallMode) : PendingAction()
+}
+```
+
+---
+
+## 4）本地动作识别：把“打电话”拆成可确认和已明确两类
+
+```kotlin
+private fun parseActionOnly(text: String): ActionType {
+    return when {
+        text.contains("视频电话") || text.contains("视频通话") -> ActionType.VIDEO_CALL
+        text.contains("语音电话") || text.contains("语音通话") -> ActionType.AUDIO_CALL
+        text.contains("打电话") -> ActionType.AUDIO_CALL
+        text.contains("发语音") -> ActionType.VOICE_MESSAGE
+        text.contains("确认") -> ActionType.CONFIRM
+        text.contains("取消") -> ActionType.CANCEL
+        else -> ActionType.UNKNOWN
     }
 }
 ```
 
-> 关键词匹配时直接传入从输入中提取的 target（如“给儿子发语音”提取“儿子”）。
-
-### 3. `ChatNavigationGuard.ensureChatWithTarget()` 内部复用搜索 Flow
-
-已在之前实现中调用 `searchFlow.execute(targetName)`，确认无误。
+这里先不改变你现有大框架，核心是：
+**“打电话”本地只能识别为 `AUDIO_CALL`，但后续是否直接执行，要看文本有没有明确语音/视频。**
 
 ---
 
-## 二、悬浮窗“搜索联系人”按钮也能复用
+## 5）LLM 结果里增加“是否明确电话类型”
 
-如果希望悬浮窗的“搜索联系人”按钮也走这个统一路径，可以将其点击事件改为调用 `chatNavGuard.ensureChatWithTarget(name)`，而非直接 `searchFlow.execute`。这样也能享受“自动开微信+回首页”的好处。但原有独立按钮仍然可用，取决于你的选择。
+让 LLM 只补充是否明确，不要越权改动作。
+
+```kotlin
+data class LlmIntentResult(
+    val actionType: ActionType? = null,
+    val target: String? = null,
+    val callMode: CallMode = CallMode.UNKNOWN,
+    val needConfirm: Boolean = false,
+    val reply: String? = null
+)
+```
+
+### 提示词加一条硬规则
+
+```kotlin
+private fun buildIntentPrompt(userText: String, hintedAction: ActionType): String {
+    return """
+你是微信意图解析器，只输出JSON。
+
+本地动作已识别为：$hintedAction
+你只能补充 target、callMode、needConfirm、reply。
+如果用户只是说“打电话”，但没有明确语音电话或视频电话，必须返回：
+needConfirm=true，并提示用户确认是语音电话还是视频电话。
+
+callMode 只能是：
+- AUDIO
+- VIDEO
+- UNKNOWN
+
+输出示例：
+{
+  "actionType": "AUDIO_CALL",
+  "target": "爸爸",
+  "callMode": "UNKNOWN",
+  "needConfirm": true,
+  "reply": "要给爸爸打语音电话还是视频电话？"
+}
+
+用户输入：$userText
+""".trimIndent()
+}
+```
 
 ---
 
-## 三、最终检查清单
+## 6）`handleByLLM()` 改成：打电话默认先确认
 
-| 功能 | 复用的模块 | 备注 |
-|------|------------|------|
-| 打开微信 | `WeChatLauncher` (新增工具类) | 仅用于启动微信，不包含操作逻辑 |
-| 返回首页 | `ChatNavigationGuard.goToHome()` | 通过连续按返回键实现，已存在 |
-| 搜索联系人 | `WeChatSearchContactFlow.execute()` | 完全复用 |
-| 发送语音 | `WeChatVoiceFlow.sendVoiceMessage()` | 完全复用 |
-| 发起通话 | `WeChatVideoCallFlow.makeCall()` | 完全复用 |
-| 聊天对象检测 | `ChatNavigationGuard.isCorrectChat()` | 顶部 OCR 匹配，已存在 |
-| 语音模式检测 | `WeChatVoiceFlow.isVoiceModeActive()` | 底部 OCR 检测“按住说话”，已存在 |
+### 修改核心逻辑
 
-**无需新增任何业务逻辑类，只需调整调用链，让意图识别的结果汇入现有执行器即可。**
+```kotlin
+suspend fun handleByLLM(userText: String, hintedAction: ActionType): RouteResult {
+    val rawResult = llmParseIntent(userText, hintedAction)
+    val result = repairLlmResult(rawResult, hintedAction)
+
+    val target = normalizeTargetFromLLM(result.target ?: "")
+    if (target.isBlank()) {
+        return RouteResult.Reply("请告诉我要操作谁")
+    }
+
+    return when (result.actionType) {
+        ActionType.VOICE_MESSAGE -> {
+            if (result.needConfirm) {
+                RouteResult.NeedConfirm(
+                    PendingAction.Voice(target),
+                    "要给$target发语音吗？"
+                )
+            } else {
+                RouteResult.DirectExecute(
+                    action = {
+                        if (!chatNavGuard.ensureChatWithTarget(target)) return@DirectExecute false
+                        delay(200)
+                        voiceFlow.sendVoiceMessage()
+                    },
+                    message = "好的，正在给$target发语音..."
+                )
+            }
+        }
+
+        ActionType.AUDIO_CALL -> {
+            // 只要不是“语音电话”这种明确表达，就先确认
+            val explicitAudio = userText.contains("语音电话") || userText.contains("语音通话")
+            if (!explicitAudio) {
+                return RouteResult.NeedConfirm(
+                    PendingAction.Call(target, CallMode.UNKNOWN),
+                    "要给$target打语音电话还是视频电话？"
+                )
+            }
+
+            if (result.needConfirm) {
+                RouteResult.NeedConfirm(
+                    PendingAction.Call(target, CallMode.AUDIO),
+                    "要给$target打语音电话吗？"
+                )
+            } else {
+                RouteResult.DirectExecute(
+                    action = {
+                        if (!chatNavGuard.ensureChatWithTarget(target)) return@DirectExecute false
+                        delay(800)
+                        callFlow.makeCall(CallMode.AUDIO)
+                    },
+                    message = "好的，正在给$target打语音电话..."
+                )
+            }
+        }
+
+        ActionType.VIDEO_CALL -> {
+            if (result.needConfirm) {
+                RouteResult.NeedConfirm(
+                    PendingAction.Call(target, CallMode.VIDEO),
+                    "要给$target打视频电话吗？"
+                )
+            } else {
+                RouteResult.DirectExecute(
+                    action = {
+                        if (!chatNavGuard.ensureChatWithTarget(target)) return@DirectExecute false
+                        delay(800)
+                        callFlow.makeCall(CallMode.VIDEO)
+                    },
+                    message = "好的，正在给$target打视频电话..."
+                )
+            }
+        }
+
+        else -> RouteResult.Reply("我没理解清楚，请再说一遍")
+    }
+}
+```
 
 ---
 
-## 四、代码改动总结
+## 7）确认按钮支持“电话类型二选一”
 
-仅需修改两个文件的少量内容：
+你现在的 `PendingAction.Call(target, CallMode.UNKNOWN)` 要能进入一个二次确认状态。
 
-1. **`IntentHandler.kt`**  
-   - `executeConfirmed` 中先调 `ensureChatWithTarget`，再调对应 Flow。  
-   - 关键词动作辅助方法（如 `sendVoiceTo`）同样先导航再调 Flow。  
-   - （可选）从用户输入中提取联系人的逻辑保持不变。
+```kotlin
+btnConfirm.setOnClickListener {
+    val action = pendingAction ?: return@setOnClickListener
 
-2. **`ChatNavigationGuard.kt`**  
-   - 加入 `WeChatLauncher.launchWeChat` 和前台检测，确保在微信内。  
-   - 修改构造函数接受 `Context` 和 `isWeChatForeground` 回调（如之前指南）。  
-   - `ensureChatWithTarget` 起始处增加微信前台判断。
+    when (action) {
+        is PendingAction.Call -> {
+            if (action.mode == CallMode.UNKNOWN) {
+                showMessage("请确认：语音电话还是视频电话？")
+                showCallModeChooser(action.target)
+                return@setOnClickListener
+            }
+        }
+        else -> {}
+    }
 
-其余文件（`WeChatVoiceFlow`、`WeChatVideoCallFlow`、`WeChatSearchContactFlow` 等）**完全不动**。
+    hideFloatingBall()
+    serviceScope.launch {
+        val ok = service.confirmAction(action)
+        showMessage(if (ok) "执行完成" else "执行失败，请重试")
+        showFloatingBall()
+    }
+}
+```
 
-这样，整个意图识别体系就建立在了已有稳定功能之上，没有任何重复实现。
+### 电话类型选择
+
+你可以做两个按钮，或者弹一个简单确认框。
+核心是把 `UNKNOWN` 再拆成明确模式。
+
+```kotlin
+private fun showCallModeChooser(target: String) {
+    // 伪代码：两个按钮
+    // 语音电话 -> pendingAction = PendingAction.Call(target, CallMode.AUDIO)
+    // 视频电话 -> pendingAction = PendingAction.Call(target, CallMode.VIDEO)
+}
+```
+
+---
+
+## 8）`confirmAction()` 里补上 UNKNOWN 分支
+
+```kotlin
+suspend fun confirmAction(action: PendingAction): Boolean {
+    return when (action) {
+        is PendingAction.Voice -> {
+            if (!chatNavGuard.ensureChatWithTarget(action.target)) return false
+            delay(200)
+            voiceFlow.sendVoiceMessage()
+        }
+
+        is PendingAction.Call -> {
+            val mode = action.mode
+            if (mode == CallMode.UNKNOWN) return false
+            if (!chatNavGuard.ensureChatWithTarget(action.target)) return false
+            delay(800)
+            callFlow.makeCall(mode)
+        }
+    }
+}
+```
+
+---
+
+## 你现在最小改三处就够了
+
+1. **语音流程**：正式执行直接复用测试按钮那条长按逻辑，不再复杂监测。
+2. **电话流程**：只有明确“语音电话 / 视频电话”才直接执行。
+3. **“打电话”模糊表达**：统一走确认，先问清楚再执行。
+
+这套改完，两个问题会直接收住。
+

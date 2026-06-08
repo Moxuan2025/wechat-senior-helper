@@ -5,7 +5,6 @@ import android.util.Log
 import com.example.wechat_senior_helper.input.CoordinateInputHelper
 import com.example.wechat_senior_helper.ocr.AccessibilityScreenshotProvider
 import com.example.wechat_senior_helper.ocr.MlKitOcrEngine
-import kotlinx.coroutines.delay
 
 class WeChatVoiceFlow(
     private val input: CoordinateInputHelper,
@@ -16,54 +15,51 @@ class WeChatVoiceFlow(
     companion object {
         private const val TAG = "WeChatVoiceFlow"
 
-        // 语音图标坐标（左下角极限）
-        private const val VOICE_ICON_X_RATIO = 0.01f
-        private const val VOICE_ICON_Y_RATIO = 0.99f
-
         // 录音按钮坐标（底部中央"按住说话"）
         private const val RECORD_BTN_X_RATIO = 0.5f
         private const val RECORD_BTN_Y_RATIO = 0.99f
 
+        // 语音图标坐标（左下角）
+        private const val VOICE_ICON_X_RATIO = 0.01f
+        private const val VOICE_ICON_Y_RATIO = 0.99f
+
         // 底部检测区域：裁剪屏幕底部 8% 高度用于 OCR
         private const val BOTTOM_CROP_TOP_RATIO = 0.92f
-
-        // 模式切换等待
-        private const val SWITCH_DELAY_MS = 300L
 
         // 默认录音时长
         private const val DEFAULT_DURATION_MS = 2000L
     }
 
     /**
-     * 在当前聊天界面发送一条语音消息，自动判断是否需要切换语音模式
-     * @param durationMs 长按录音的时长（毫秒）
+     * 直接长按录音（复用测试按钮的稳定路径），不做复杂监测。
+     * 调用前应确保已在目标聊天页，且处于语音输入模式。
      */
     suspend fun sendVoiceMessage(durationMs: Long = DEFAULT_DURATION_MS): Boolean {
         return try {
-            // 1. 检测当前底部是否为"按住说话"状态
-            val alreadyVoiceMode = isVoiceModeActive()
-
-            if (!alreadyVoiceMode) {
-                // 2. 不是语音模式 → 点击语音图标切换
-                Log.e(TAG, "非语音模式，点击语音图标切换")
-                input.tapByRatio(VOICE_ICON_X_RATIO, VOICE_ICON_Y_RATIO)
-                delay(SWITCH_DELAY_MS)
-            } else {
-                Log.e(TAG, "已在语音模式，跳过图标点击")
-            }
-
-            // 3. 长按录音按钮（按下、保持、释放）
-            input.longPressByRatio(
-                RECORD_BTN_X_RATIO,
-                RECORD_BTN_Y_RATIO,
-                durationMs
-            )
-
+            input.longPressByRatio(RECORD_BTN_X_RATIO, RECORD_BTN_Y_RATIO, durationMs)
             true
         } catch (e: Exception) {
             Log.e(TAG, "语音发送失败: ${e.message}")
             false
         }
+    }
+
+    /**
+     * 轻量检查：如果当前不是语音模式，点击切换一次。
+     * 不重试、不循环。由调用方决定是否调用。
+     */
+    suspend fun ensureVoiceModeIfNeeded(): Boolean {
+        return isVoiceModeActive() || switchToVoiceMode()
+    }
+
+    /**
+     * 点击语音图标切换为语音模式
+     */
+    private suspend fun switchToVoiceMode(): Boolean {
+        if (isVoiceModeActive()) return true
+        Log.e(TAG, "点击语音图标切换模式")
+        input.tapByRatio(VOICE_ICON_X_RATIO, VOICE_ICON_Y_RATIO)
+        return true
     }
 
     /**
@@ -77,7 +73,6 @@ class WeChatVoiceFlow(
             val height = fullBitmap.height
             val cropTop = (height * BOTTOM_CROP_TOP_RATIO).toInt()
 
-            // 裁剪底部区域（8% 高度）
             val bottomBitmap = Bitmap.createBitmap(
                 fullBitmap, 0, cropTop, width, height - cropTop
             )
@@ -91,7 +86,7 @@ class WeChatVoiceFlow(
             recognizedText.contains("按住说话")
         } catch (e: Exception) {
             Log.e(TAG, "底部OCR检测失败: ${e.message}")
-            false  // 检测失败保守处理：执行完整流程
+            false
         }
     }
 }

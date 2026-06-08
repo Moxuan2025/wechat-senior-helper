@@ -21,6 +21,7 @@ import android.widget.TextView
 import androidx.core.app.NotificationCompat
 import com.example.wechat_senior_helper.MainActivity
 import com.example.wechat_senior_helper.R
+import com.example.wechat_senior_helper.flow.CallMode
 import com.example.wechat_senior_helper.flow.IntentHandler
 import com.example.wechat_senior_helper.transaction.Transaction
 import com.example.wechat_senior_helper.transaction.TransactionScheduler
@@ -51,6 +52,8 @@ class FloatingBallService : Service() {
     private var pendingAction: IntentHandler.PendingAction? = null
     private lateinit var tvMessage: android.widget.TextView
     private lateinit var btnConfirm: android.widget.Button
+    private lateinit var btnChooseAudio: android.widget.Button
+    private lateinit var btnChooseVideo: android.widget.Button
 
     override fun onCreate() {
         super.onCreate()
@@ -186,9 +189,11 @@ class FloatingBallService : Service() {
             }
         }
 
-        // Message display + confirm
+        // Message display + confirm + call mode chooser
         tvMessage = floatingView?.findViewById(R.id.tv_message)!!
         btnConfirm = floatingView?.findViewById(R.id.btn_confirm)!!
+        btnChooseAudio = floatingView?.findViewById(R.id.btn_choose_audio)!!
+        btnChooseVideo = floatingView?.findViewById(R.id.btn_choose_video)!!
 
         // Intent input
         val etIntent = floatingView?.findViewById<EditText>(R.id.et_intent_text)
@@ -205,21 +210,23 @@ class FloatingBallService : Service() {
             Log.e(TAG, "💬 意图输入: $text")
             updateStatus("思考中...")
             serviceScope.launch {
-                val result = service.handleIntent(text)
-                when (result) {
-                    is IntentHandler.HandleResult.Executed -> {
-                        showMessage(result.message)
+                when (val result = service.handleIntent(text)) {
+                    is IntentHandler.RouteResult.DirectExecute -> {
+                        updateStatus("执行中...")
+                        hideFloatingBall()
+                        val ok = result.action.invoke()
+                        showMessage(if (ok) result.message else "执行失败，请重试")
+                        showFloatingBall()
                         updateStatus("就绪")
                     }
-                    is IntentHandler.HandleResult.NeedConfirm -> {
-                        val msg = "要${result.pending.friendlyMessage}吗？"
-                        showMessage(msg)
+                    is IntentHandler.RouteResult.NeedConfirm -> {
+                        showMessage(result.message)
                         pendingAction = result.pending
-                        btnConfirm.text = "确认：${result.pending.friendlyMessage}"
+                        btnConfirm.text = "确认"
                         btnConfirm.visibility = View.VISIBLE
                         updateStatus("等待确认")
                     }
-                    is IntentHandler.HandleResult.Reply -> {
+                    is IntentHandler.RouteResult.Reply -> {
                         showMessage(result.message)
                         updateStatus("就绪")
                     }
@@ -231,14 +238,54 @@ class FloatingBallService : Service() {
         btnConfirm.setOnClickListener {
             val action = pendingAction ?: return@setOnClickListener
             val service = AccessibilityServiceStateManager.instance ?: return@setOnClickListener
+
+            // 电话类型不明确 → 弹出选择
+            if (action is IntentHandler.PendingAction.Call && action.mode == CallMode.UNKNOWN) {
+                showCallModeChooser(action.target)
+                return@setOnClickListener
+            }
+
             btnConfirm.visibility = View.GONE
             pendingAction = null
             updateStatus("执行中...")
             hideFloatingBall()
             serviceScope.launch {
-                val msg = service.confirmAction(action)
-                showMessage(msg)
-                updateStatus(msg)
+                val ok = service.confirmAction(action)
+                showMessage(if (ok) "执行完成" else "执行失败，请重试")
+                showFloatingBall()
+                updateStatus("就绪")
+            }
+        }
+
+        // 电话类型选择：语音电话
+        btnChooseAudio.setOnClickListener {
+            val action = pendingAction as? IntentHandler.PendingAction.Call ?: return@setOnClickListener
+            val service = AccessibilityServiceStateManager.instance ?: return@setOnClickListener
+            hideCallModeChooser()
+            pendingAction = null
+            updateStatus("执行中...")
+            hideFloatingBall()
+            serviceScope.launch {
+                val ok = service.confirmAction(IntentHandler.PendingAction.Call(action.target, CallMode.AUDIO))
+                showMessage(if (ok) "执行完成" else "执行失败，请重试")
+                showFloatingBall()
+                updateStatus("就绪")
+            }
+        }
+
+        // 电话类型选择：视频电话
+        btnChooseVideo.setOnClickListener {
+            val action = pendingAction as? IntentHandler.PendingAction.Call ?: return@setOnClickListener
+            val service = AccessibilityServiceStateManager.instance ?: return@setOnClickListener
+            hideCallModeChooser()
+            pendingAction = null
+            updateStatus("执行中...")
+            hideFloatingBall()
+            serviceScope.launch {
+                val ok = service.confirmAction(IntentHandler.PendingAction.Call(action.target, CallMode.VIDEO))
+                showMessage(if (ok) "执行完成" else "执行失败，请重试")
+                showFloatingBall()
+                updateStatus("就绪")
             }
         }
 
@@ -258,12 +305,11 @@ class FloatingBallService : Service() {
             isExecuting = true
             updateStatus("发起语音通话...")
             hideFloatingBall()
-            service.requestVideoCall(true)
             serviceScope.launch {
-                delay(6000)
+                val ok = service.requestVideoCall(CallMode.AUDIO)
                 isExecuting = false
                 showFloatingBall()
-                updateStatus("就绪")
+                updateStatus(if (ok) "就绪" else "执行失败")
             }
         }
 
@@ -399,6 +445,20 @@ class FloatingBallService : Service() {
         tvMessage.text = msg
         tvMessage.visibility = View.VISIBLE
         Log.d(TAG, "消息: $msg")
+    }
+
+    private fun showCallModeChooser(target: String) {
+        showMessage("请确认给${target}打：")
+        btnConfirm.visibility = View.GONE
+        btnChooseAudio.visibility = View.VISIBLE
+        btnChooseVideo.visibility = View.VISIBLE
+        Log.d(TAG, "显示电话类型选择: 语音/视频")
+    }
+
+    private fun hideCallModeChooser() {
+        btnChooseAudio.visibility = View.GONE
+        btnChooseVideo.visibility = View.GONE
+        Log.d(TAG, "隐藏电话类型选择")
     }
 
     override fun onBind(intent: Intent?): IBinder? {

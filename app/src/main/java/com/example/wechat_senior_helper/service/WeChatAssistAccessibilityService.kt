@@ -10,6 +10,7 @@ import android.graphics.Path
 import android.os.Build
 import android.util.Log
 import android.view.accessibility.AccessibilityEvent
+import com.example.wechat_senior_helper.flow.CallMode
 import com.example.wechat_senior_helper.flow.WeChatChatReadFlow
 import com.example.wechat_senior_helper.flow.WeChatSearchContactFlow
 import com.example.wechat_senior_helper.flow.ChatNavigationGuard
@@ -26,6 +27,8 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
@@ -48,6 +51,7 @@ class WeChatAssistAccessibilityService : AccessibilityService() {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private val busy = AtomicBoolean(false)
+    private val flowLock = Mutex()
 
     private lateinit var screenshotProvider: AccessibilityScreenshotProvider
     private lateinit var ocrEngine: MlKitOcrEngine
@@ -181,23 +185,23 @@ class WeChatAssistAccessibilityService : AccessibilityService() {
     }
 
     /**
-     * 组合流程：搜索联系人→进入聊天→发送语音
+     * 直接发起通话（不导航，在当前页面操作）
      */
-    fun requestVideoCall(useVoice: Boolean = true) {
-        Log.e(TAG, "[VIDEO_CALL] useVoice=$useVoice")
+    suspend fun requestVideoCall(mode: CallMode = CallMode.AUDIO): Boolean = flowLock.withLock {
+        Log.e(TAG, "[VIDEO_CALL] mode=$mode")
         if (!busy.compareAndSet(false, true)) {
             Log.w(TAG, "[BUSY] 上次操作未完成")
-            return
+            return false
         }
-        scope.launch {
-            try {
-                val ok = videoCallFlow.makeCall(useVoice)
-                Log.e(TAG, "[VIDEO_CALL] result=$ok")
-            } catch (t: Throwable) {
-                Log.e(TAG, "[VIDEO_CALL_FAIL] ${t.message}", t)
-            } finally {
-                busy.set(false)
-            }
+        try {
+            val ok = videoCallFlow.makeCall(mode)
+            Log.e(TAG, "[VIDEO_CALL] result=$ok")
+            ok
+        } catch (t: Throwable) {
+            Log.e(TAG, "[VIDEO_CALL_FAIL] ${t.message}", t)
+            false
+        } finally {
+            busy.set(false)
         }
     }
 
@@ -219,12 +223,12 @@ class WeChatAssistAccessibilityService : AccessibilityService() {
         }
     }
 
-    suspend fun handleIntent(text: String): IntentHandler.HandleResult {
+    suspend fun handleIntent(text: String): IntentHandler.RouteResult {
         return intentHandler.handle(text)
     }
 
-    suspend fun confirmAction(pending: IntentHandler.PendingAction): String {
-        return intentHandler.executeConfirmed(pending)
+    suspend fun confirmAction(pending: IntentHandler.PendingAction): Boolean {
+        return intentHandler.executePending(pending)
     }
 
     fun requestSearchThenVoice(contactName: String, voiceDurationMs: Long = 3000L) {

@@ -3,14 +3,16 @@ package com.example.wechat_senior_helper.flow
 import android.content.Context
 import android.util.Log
 import com.example.wechat_senior_helper.net.HunyuanHelper
-import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.launch
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import kotlin.coroutines.resume
+
+typealias SuspendAction = suspend () -> Boolean
+
+enum class CallMode { AUDIO, VIDEO, UNKNOWN }
 
 class IntentHandler(
     private val searchFlow: WeChatSearchContactFlow,
@@ -23,175 +25,340 @@ class IntentHandler(
         private const val TAG = "IntentHandler"
     }
 
+    // ===================== 动作类型（规则层只识动作，不碰对象） =====================
+    private enum class ActionType {
+        AUDIO_CALL,
+        VIDEO_CALL,
+        VOICE_MESSAGE,
+        CONFIRM,
+        CANCEL,
+        UNKNOWN
+    }
+
     // ===================== 数据类 =====================
-    data class PendingAction(
-        val action: String,         // "voice" / "video" / "text" / "none"
-        val target: String,
-        val friendlyMessage: String // 给用户看的提示，如"给儿子发语音"
-    )
-
-    sealed class HandleResult {
-        data class Executed(val message: String) : HandleResult()      // 已执行（关键词）
-        data class NeedConfirm(val pending: PendingAction) : HandleResult()  // 需确认
-        data class Reply(val message: String) : HandleResult()         // 闲聊/追问
+    sealed class PendingAction {
+        data class Voice(val target: String) : PendingAction()
+        data class Call(val target: String, val mode: CallMode) : PendingAction()
     }
 
-    // ===================== 关键词映射 =====================
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
+    sealed class RouteResult {
+        data class DirectExecute(
+            val action: SuspendAction,
+            val message: String
+        ) : RouteResult()
 
-    private val keywordActions: Map<Set<String>, suspend () -> Unit> = mapOf(
-        setOf("儿子", "孙子") to { sendVoiceTo("儿子", 2000) },
-        setOf("老公") to { sendVoiceTo("老公", 2000) },
-        setOf("老婆") to { sendVoiceTo("老婆", 2000) },
-        setOf("视频", "通话") to { videoCallFlow.makeCall(false) },
-        setOf("打视频") to { videoCallFlow.makeCall(false) },
-        setOf("语音通话") to { videoCallFlow.makeCall(true) },
-        setOf("打电话") to { videoCallFlow.makeCall(true) },
-        setOf("首页") to { chatNavGuard.goToHome() },
-        setOf("返回") to { chatNavGuard.goToHome() }
-    )
+        data class NeedConfirm(
+            val pending: PendingAction,
+            val message: String
+        ) : RouteResult()
 
-    // ===================== 主入口 =====================
-    suspend fun handle(text: String): HandleResult {
-        val input = text.trim()
-        Log.e(TAG, "========================================")
-        Log.e(TAG, "[意图输入] '$input'")
-        if (input.isEmpty()) return HandleResult.Reply("您想做什么？")
-
-        // 关键词匹配 → 直接执行
-        val keywordResult = matchKeyword(input)
-        if (keywordResult != null) {
-            Log.e(TAG, "[意图结果] 关键词 → ${keywordResult}")
-            Log.e(TAG, "========================================")
-            return keywordResult
-        }
-
-        // 交给大模型
-        Log.e(TAG, "[意图路由] 转交混元大模型")
-        val llmResult = askLLM(input)
-        Log.e(TAG, "[意图结果] 大模型 → ${llmResult}")
-        Log.e(TAG, "========================================")
-        return llmResult
+        data class Reply(
+            val message: String
+        ) : RouteResult()
     }
 
-    /** 执行用户已确认的操作 */
-    suspend fun executeConfirmed(pending: PendingAction): String {
-        Log.e(TAG, "[执行确认] action='${pending.action}' target='${pending.target}'")
-        return try {
-            val action: suspend () -> Unit = when (pending.action) {
-                "voice" -> { { voiceFlow.sendVoiceMessage() } }
-                "video" -> { { videoCallFlow.makeCall(true) } }
-                else -> return "不支持的操作"
-            }
-            chatNavGuard.navigateAndExecute(pending.target, action)
-        } catch (e: Exception) {
-            Log.e(TAG, "执行确认操作失败", e)
-            "执行失败，请重试"
+    // ===================== 主入口：动作命中 → 全部交给大模型 =====================
+    suspend fun handle(input: String): RouteResult {
+        val text = input.trim()
+        Log.e(TAG, "========================================")
+        Log.e(TAG, "[意图输入] '$text'")
+        if (text.isEmpty()) return RouteResult.Reply("您想做什么？")
+
+        val actionType = parseActionOnly(text)
+        Log.e(TAG, "[动作识别] actionType=$actionType")
+
+        return handleByLLM(userText = text, hintedAction = actionType)
+    }
+
+    // ===================== 规则层：只识别动作，不抽取对象 =====================
+    private fun parseActionOnly(text: String): ActionType {
+        return when {
+            text.contains("视频电话") || text.contains("视频通话")
+                -> ActionType.VIDEO_CALL
+            text.contains("语音电话") || text.contains("语音通话")
+                -> ActionType.AUDIO_CALL
+            text.contains("打电话")
+                -> ActionType.AUDIO_CALL
+            text.contains("发语音")
+                -> ActionType.VOICE_MESSAGE
+            text.contains("确认")
+                -> ActionType.CONFIRM
+            text.contains("取消")
+                -> ActionType.CANCEL
+            else -> ActionType.UNKNOWN
         }
     }
 
-    // ===================== 关键词匹配 =====================
-    private suspend fun matchKeyword(input: String): HandleResult? {
-        for ((keywords, action) in keywordActions) {
-            if (keywords.all { input.contains(it) }) {
-                Log.e(TAG, "[关键词命中] 规则=${keywords.joinToString(",")}")
-                action.invoke()
-                val msg = when {
-                    keywords.any { it in setOf("儿子", "孙子") } -> "好的奶奶，正在给儿子发语音..."
-                    keywords.contains("老公") -> "好的，正在给老公发语音..."
-                    keywords.contains("老婆") -> "好的，正在给老婆发语音..."
-                    keywords.any { it in setOf("视频", "打视频") } -> "好的，正在发起视频通话..."
-                    keywords.any { it in setOf("语音通话", "打电话") } -> "好的，正在发起语音通话..."
-                    keywords.any { it in setOf("首页", "返回") } -> "好的，已帮您回到首页"
-                    else -> "好的，已执行"
+    // ===================== 联系人归一化（只在 LLM 输出后做） =====================
+    private fun normalizeTarget(raw: String): String {
+        val s = raw.trim().replace(" ", "")
+        return when (s) {
+            "我爸", "我爸爸", "爸爸" -> "爸爸"
+            "我妈", "我妈妈", "妈妈" -> "妈妈"
+            "我儿子", "儿子" -> "儿子"
+            "我女儿", "女儿" -> "女儿"
+            "我老公", "老公" -> "老公"
+            "我老婆", "老婆" -> "老婆"
+            else -> s
+        }
+    }
+
+    // ===================== LLM 路径：提示词 + 调用 + 解析 + 修复 =====================
+    private suspend fun handleByLLM(userText: String, hintedAction: ActionType): RouteResult {
+        Log.e(TAG, "[LLM路由] userText='$userText' hintedAction=$hintedAction")
+
+        val systemPrompt = buildIntentPrompt(userText, hintedAction)
+        val messages = listOf(mapOf("role" to "user", "content" to userText))
+
+        val rawJson = askLLMRaw(systemPrompt, messages) ?: run {
+            Log.e(TAG, "[LLM路由] 大模型返回空")
+            return RouteResult.Reply("抱歉，我没听明白，请再说一遍")
+        }
+
+        val rawResult = parseLlmResult(rawJson)
+        Log.e(TAG, "[LLM原始] actionType=${rawResult.actionType} target='${rawResult.target}' callMode=${rawResult.callMode} needConfirm=${rawResult.needConfirm}")
+
+        // 本地动作优先：即使 LLM 乱回，也强制改回 hintedAction
+        val rawResult2 = repairLlmResult(rawResult, hintedAction)
+
+        val actionType = rawResult2.actionType
+        val target = normalizeTarget(rawResult2.target ?: "")
+        val needConfirm = rawResult2.needConfirm
+        val reply = rawResult2.reply?.trim()?.takeIf { it.isNotBlank() && it.lowercase() != "null" }
+            ?: defaultReply(actionType, target)
+
+        Log.e(TAG, "[LLM解析] actionType=$actionType target='$target' needConfirm=$needConfirm reply='$reply'")
+
+        if (target.isBlank()) {
+            return RouteResult.Reply(reply.ifBlank { "请告诉我要操作谁" })
+        }
+
+        return when (actionType) {
+            ActionType.VOICE_MESSAGE -> {
+                if (needConfirm) {
+                    RouteResult.NeedConfirm(
+                        PendingAction.Voice(target),
+                        "要给${target}发语音吗？"
+                    )
+                } else {
+                    RouteResult.DirectExecute(
+                        action = {
+                            if (!chatNavGuard.ensureChatWithTarget(target)) return@DirectExecute false
+                            delay(200)
+                            voiceFlow.sendVoiceMessage()
+                        },
+                        message = "好的，正在给${target}发语音..."
+                    )
                 }
-                return HandleResult.Executed(msg)
             }
+
+            ActionType.AUDIO_CALL -> {
+                // 只要不是"语音电话"这种明确表达，就先确认
+                val explicitAudio = userText.contains("语音电话") || userText.contains("语音通话")
+                if (!explicitAudio) {
+                    return RouteResult.NeedConfirm(
+                        PendingAction.Call(target, CallMode.UNKNOWN),
+                        "要给${target}打语音电话还是视频电话？"
+                    )
+                }
+
+                if (needConfirm) {
+                    RouteResult.NeedConfirm(
+                        PendingAction.Call(target, CallMode.AUDIO),
+                        "要给${target}打语音电话吗？"
+                    )
+                } else {
+                    RouteResult.DirectExecute(
+                        action = {
+                            if (!chatNavGuard.ensureChatWithTarget(target)) return@DirectExecute false
+                            delay(800)
+                            videoCallFlow.makeCall(CallMode.AUDIO)
+                        },
+                        message = "好的，正在给${target}打语音电话..."
+                    )
+                }
+            }
+
+            ActionType.VIDEO_CALL -> {
+                if (needConfirm) {
+                    RouteResult.NeedConfirm(
+                        PendingAction.Call(target, CallMode.VIDEO),
+                        "要给${target}打视频电话吗？"
+                    )
+                } else {
+                    RouteResult.DirectExecute(
+                        action = {
+                            if (!chatNavGuard.ensureChatWithTarget(target)) return@DirectExecute false
+                            delay(800)
+                            videoCallFlow.makeCall(CallMode.VIDEO)
+                        },
+                        message = "好的，正在给${target}打视频电话..."
+                    )
+                }
+            }
+
+            ActionType.CONFIRM -> RouteResult.Reply("请点击确认按钮来执行操作")
+            ActionType.CANCEL -> RouteResult.Reply("已取消")
+            ActionType.UNKNOWN, null -> RouteResult.Reply("我没理解清楚，请再说一遍")
         }
-        return null  // 交给 LLM
     }
 
-    private suspend fun sendVoiceTo(name: String, durationMs: Long) {
-        Log.e(TAG, "[执行] sendVoiceTo name='$name' durationMs=$durationMs")
-        val ok = chatNavGuard.ensureChatWithTarget(name)
-        if (ok) {
-            voiceFlow.sendVoiceMessage(durationMs)
-            Log.e(TAG, "[执行] sendVoiceTo 完成")
-        } else {
-            Log.e(TAG, "[执行] sendVoiceTo 导航失败")
-        }
+    // ===================== LLM 提示词 =====================
+    private fun buildIntentPrompt(userText: String, hintedAction: ActionType): String {
+        return """
+你是微信意图解析器，只输出JSON。
+
+本地动作已识别为：$hintedAction
+你只能补充 target、callMode、needConfirm、reply。
+如果用户只是说"打电话"，但没有明确语音电话或视频电话，必须返回：
+needConfirm=true，并提示用户确认是语音电话还是视频电话。
+
+callMode 只能是：
+- AUDIO
+- VIDEO
+- UNKNOWN
+
+输出示例：
+{
+  "actionType": "AUDIO_CALL",
+  "target": "爸爸",
+  "callMode": "UNKNOWN",
+  "needConfirm": true,
+  "reply": "要给爸爸打语音电话还是视频电话？"
+}
+
+用户输入：$userText
+""".trimIndent()
     }
 
-    // ===================== 混元大模型 =====================
-    private suspend fun askLLM(userInput: String): HandleResult = withContext(Dispatchers.IO) {
+    // ===================== LLM 原始调用 =====================
+    private suspend fun askLLMRaw(
+        systemPrompt: String,
+        messages: List<Map<String, String>>
+    ): String? = withContext(Dispatchers.IO) {
         suspendCancellableCoroutine { cont ->
-            val systemPrompt = """
-                你是微信助手，请严格按以下 JSON 格式输出，不要添加任何其他文字：
-                {
-                  "action": "voice" | "video" | "text" | "none",
-                  "target": "联系人姓名（没有则为空字符串）",
-                  "reply": "回复给用户的话"
-                }
-                规则：
-                1. 如果用户说"想某人""发语音"且给出了对象（如"儿子"），action 对应 "voice"，target 填对象名，reply 为"好的，正在给[对象]发语音"。
-                2. 如果用户说"视频通话"且有对象，action="video"，target 填对象，reply 同前。
-                3. 如果缺少对象（如"想"、"发语音"），action="none"，target 留空，reply 追问"您想谁了？"或"您想发给谁呢？"。
-                4. 如果是闲聊或无法识别，action="none"，target 留空，reply 为自然友好的回复。
-                5. 务必只输出合法 JSON，不要带任何解释、标点之外的文字。
-            """.trimIndent()
-
-            val messages = listOf(mapOf("role" to "user", "content" to userInput))
-
-            Log.e(TAG, "[混元请求] model=hunyuan-lite")
+            Log.e(TAG, "[混元请求]")
             HunyuanHelper.getChatResponse(messages, systemPrompt, appContext) { raw ->
                 if (!cont.isActive) return@getChatResponse
                 Log.e(TAG, "[混元响应] raw=${raw.take(300)}")
+                cont.resume(raw)
+            }
+        }
+    }
 
-                try {
-                    // 清洗：提取 JSON
-                    val cleaned = raw.trim()
-                        .removePrefix("```json")
-                        .removeSuffix("```")
-                        .removePrefix("```")
-                        .trim()
+    // ===================== LLM 结果解析 =====================
+    private data class LlmIntentResult(
+        val actionType: ActionType? = null,   // LLM 返回的动作（不可信，会被修复）
+        val target: String? = null,
+        val callMode: CallMode = CallMode.UNKNOWN,
+        val needConfirm: Boolean = false,
+        val reply: String? = null
+    )
 
-                    val jsonStr = if (cleaned.startsWith("{")) {
-                        cleaned
-                    } else {
-                        val start = cleaned.indexOf('{')
-                        val end = cleaned.lastIndexOf('}')
-                        if (start >= 0 && end > start) cleaned.substring(start, end + 1) else ""
+    private fun parseLlmResult(raw: String): LlmIntentResult {
+        return try {
+            val jsonStr = stripCodeFence(raw)
+
+            if (jsonStr.isEmpty()) {
+                return LlmIntentResult(reply = "我没听明白，请再说一遍")
+            }
+
+            val json = JSONObject(jsonStr)
+            val actionType = parseActionType(json.optString("actionType", ""))
+            val target = json.optString("target", "").takeIf { it.isNotBlank() }
+            val callMode = parseCallMode(json.optString("callMode", ""))
+            val needConfirm = json.optBoolean("needConfirm", false)
+            val reply = json.optString("reply", "").takeIf { it.isNotBlank() }
+
+            LlmIntentResult(actionType, target, callMode, needConfirm, reply)
+        } catch (e: Exception) {
+            Log.e(TAG, "[LLM解析异常] ${e.message}", e)
+            LlmIntentResult(reply = "抱歉，我没听明白，请再说清楚些")
+        }
+    }
+
+    private fun parseCallMode(s: String): CallMode {
+        return try {
+            CallMode.valueOf(s.uppercase())
+        } catch (_: Exception) {
+            CallMode.UNKNOWN
+        }
+    }
+
+    /** 剥离 LLM 响应的 ```json 外壳 */
+    private fun stripCodeFence(raw: String): String {
+        val cleaned = raw.trim()
+            .removePrefix("```json")
+            .removePrefix("```")
+            .removeSuffix("```")
+            .trim()
+
+        return if (cleaned.startsWith("{")) {
+            cleaned
+        } else {
+            val start = cleaned.indexOf('{')
+            val end = cleaned.lastIndexOf('}')
+            if (start >= 0 && end > start) cleaned.substring(start, end + 1) else ""
+        }
+    }
+
+    /** 本地动作优先：hintedAction 非 UNKNOWN 时，LLM 不可改 */
+    private fun forceActionIfHinted(hintedAction: ActionType, llmAction: ActionType?): ActionType {
+        return if (hintedAction != ActionType.UNKNOWN) hintedAction else (llmAction ?: ActionType.UNKNOWN)
+    }
+
+    /** 修复 LLM 结果：本地动作永远优先 */
+    private fun repairLlmResult(raw: LlmIntentResult, hintedAction: ActionType): LlmIntentResult {
+        val finalAction = forceActionIfHinted(hintedAction, raw.actionType)
+        return raw.copy(
+            actionType = finalAction,
+            target = raw.target?.trim(),
+            reply = raw.reply?.trim()
+        )
+    }
+
+    private fun parseActionType(s: String): ActionType? {
+        return try {
+            ActionType.valueOf(s)
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    // ===================== 兜底回复 =====================
+    private fun defaultReply(actionType: ActionType?, target: String): String {
+        return when (actionType) {
+            ActionType.AUDIO_CALL -> "好的，正在给${target}打电话..."
+            ActionType.VOICE_MESSAGE -> "好的，正在给${target}发语音..."
+            ActionType.VIDEO_CALL -> "好的，正在和${target}视频通话..."
+            else -> "好的，正在处理..."
+        }
+    }
+
+    // ===================== 确认后执行 =====================
+    suspend fun executePending(action: PendingAction): Boolean {
+        Log.e(TAG, "[执行确认] action=$action")
+        return try {
+            when (action) {
+                is PendingAction.Voice -> {
+                    if (!chatNavGuard.ensureChatWithTarget(action.target)) return false
+                    delay(200)
+                    voiceFlow.sendVoiceMessage()
+                }
+                is PendingAction.Call -> {
+                    val mode = action.mode
+                    if (mode == CallMode.UNKNOWN) {
+                        Log.e(TAG, "[执行确认] CallMode.UNKNOWN，拒绝执行")
+                        return false
                     }
-
-                    if (jsonStr.isEmpty()) {
-                        Log.e(TAG, "[混元解析失败] 未提取到 JSON，当作闲聊")
-                        cont.resume(HandleResult.Reply(raw.take(100)))
-                        return@getChatResponse
-                    }
-
-                    val llmResult = JSONObject(jsonStr)
-                    val action = llmResult.optString("action", "none")
-                    val target = llmResult.optString("target", "")
-                    val reply = llmResult.optString("reply", "好的")
-
-                    Log.e(TAG, "[混元解析] action='$action' target='$target' reply='$reply'")
-
-                    if (action == "none" || action == "text") {
-                        cont.resume(HandleResult.Reply(reply))
-                    } else {
-                        val friendlyMsg = when (action) {
-                            "voice" -> "给${target}发语音"
-                            "video" -> "和${target}视频通话"
-                            else -> "执行：${action} ${target}"
-                        }
-                        Log.e(TAG, "[混元确认] 待确认: $friendlyMsg")
-                        cont.resume(HandleResult.NeedConfirm(PendingAction(action, target, friendlyMsg)))
-                    }
-                } catch (e: Exception) {
-                    Log.e(TAG, "[混元解析异常] ${e.message}", e)
-                    cont.resume(HandleResult.Reply("抱歉，我没听明白，请再说清楚些"))
+                    if (!chatNavGuard.ensureChatWithTarget(action.target)) return false
+                    delay(800)
+                    videoCallFlow.makeCall(mode)
                 }
             }
+        } catch (e: Exception) {
+            Log.e(TAG, "执行确认操作失败", e)
+            false
         }
     }
 }

@@ -24,9 +24,9 @@ class WeChatVideoCallFlow(
         private const val PLUS_BTN_Y_RATIO = 0.99f
 
         // 菜单弹出等待
-        private const val MENU_DELAY_MS = 500L
+        private const val MENU_DELAY_MS = 600L
         // 界面切换等待
-        private const val PAGE_DELAY_MS = 800L
+        private const val PAGE_DELAY_MS = 600L
 
         // OCR 裁剪区域：从屏幕 40% 到 100%（覆盖菜单和底部面板）
         private const val CROP_TOP_RATIO = 0.4f
@@ -36,30 +36,44 @@ class WeChatVideoCallFlow(
     }
 
     /**
-     * 发起语音通话（默认），可切换为视频通话
-     * @param useVoice true=语音通话，false=视频通话
+     * 发起语音/视频通话
+     * @param mode AUDIO=语音通话，VIDEO=视频通话
      */
-    suspend fun makeCall(useVoice: Boolean = true): Boolean {
+    suspend fun makeCall(mode: CallMode = CallMode.AUDIO): Boolean {
         return try {
             // 1. 点击加号
             input.tapByRatio(PLUS_BTN_X_RATIO, PLUS_BTN_Y_RATIO)
             delay(MENU_DELAY_MS)
 
-            // 2. 点击菜单中的"视频通话"
-            val videoCallHit = findAndTapText("视频通话") ?: return false
+            // 2. 点击菜单中的"视频通话"，失败重试一次
+            var videoCallHit = findAndTapText("视频通话")
+            if (videoCallHit == null) {
+                delay(300)
+                videoCallHit = findAndTapText("视频通话")
+            }
+            if (videoCallHit == null) {
+                Log.e(TAG, "未找到菜单项「视频通话」")
+                return false
+            }
             Log.e(TAG, "点击视频通话: ${videoCallHit.text}")
             delay(PAGE_DELAY_MS)
 
             // 3. 点击"语音通话"或"视频通话"
-            val targetText = if (useVoice) "语音通话" else "视频通话"
+            val targetText = when (mode) {
+                CallMode.AUDIO -> "语音通话"
+                CallMode.VIDEO -> "视频通话"
+                CallMode.UNKNOWN -> {
+                    Log.e(TAG, "CallMode.UNKNOWN 不支持")
+                    return false
+                }
+            }
             val callHit = findAndTapText(targetText)
             if (callHit != null) {
                 Log.e(TAG, "点击$targetText 成功")
                 true
             } else {
-                // 可能默认就是语音通话，已自动发起
-                Log.w(TAG, "未找到 $targetText，可能已直接发起")
-                true
+                Log.e(TAG, "未找到 $targetText")
+                false
             }
         } catch (e: Exception) {
             Log.e(TAG, "通话发起失败: ${e.message}")
