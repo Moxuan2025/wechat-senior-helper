@@ -202,6 +202,39 @@ class FloatingBallService : Service() {
             val text = etIntent?.text?.toString()?.trim() ?: return@setOnClickListener
             if (text.isBlank()) return@setOnClickListener
             etIntent?.text?.clear()
+
+            // 如果当前正在等待电话类型选择（CallMode.UNKNOWN），
+            // 用户用文本回复"视频电话/语音电话"时，直接复用 pendingAction.target 执行
+            val pending = pendingAction
+            if (pending is IntentHandler.PendingAction.Call && pending.mode == CallMode.UNKNOWN) {
+                val chosenMode: CallMode? = when {
+                    text.contains("视频") -> CallMode.VIDEO
+                    text.contains("语音") -> CallMode.AUDIO
+                    else -> null
+                }
+                if (chosenMode != null) {
+                    val service = AccessibilityServiceStateManager.instance
+                    if (service == null) {
+                        showMessage("无障碍服务未连接")
+                        return@setOnClickListener
+                    }
+                    hideCallModeChooser()
+                    pendingAction = null
+                    Log.e(TAG, "💬 电话类型选择: 目标=${pending.target} 模式=$chosenMode")
+                    updateStatus("执行中...")
+                    hideFloatingBall()
+                    serviceScope.launch {
+                        val ok = service.confirmAction(
+                            IntentHandler.PendingAction.Call(pending.target, chosenMode)
+                        )
+                        showMessage(if (ok) "执行完成" else "执行失败，请重试")
+                        showFloatingBall()
+                        updateStatus("就绪")
+                    }
+                    return@setOnClickListener
+                }
+            }
+
             val service = AccessibilityServiceStateManager.instance
             if (service == null) {
                 showMessage("无障碍服务未连接")

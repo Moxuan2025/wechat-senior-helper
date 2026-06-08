@@ -21,7 +21,7 @@ class WeChatVoiceFlow(
         private const val RECORD_BTN_Y_RATIO = 0.99f
 
         // 语音图标坐标（左下角，点击切换为语音模式）
-        private const val VOICE_ICON_X_RATIO = 0.01f
+        private const val VOICE_ICON_X_RATIO = 0.08f
         private const val VOICE_ICON_Y_RATIO = 0.99f
 
         // 底部检测区域：裁剪屏幕底部 8% 高度用于 OCR
@@ -50,6 +50,8 @@ class WeChatVoiceFlow(
      * OCR 检测底部是否有"按住说话"，没有则点击语音图标切换。
      */
     private suspend fun ensureVoiceMode() {
+        // 先等一下，避免界面正在切换中
+        delay(300)
         if (isVoiceModeActive()) return
         Log.e(TAG, "点击语音图标切换模式")
         input.tapByRatio(VOICE_ICON_X_RATIO, VOICE_ICON_Y_RATIO)
@@ -71,12 +73,14 @@ class WeChatVoiceFlow(
             )
 
             val result = ocrEngine.recognize(bottomBitmap, preferChinese = true)
+            val text = result.text
+            Log.e(TAG, "底部OCR识别文本: [$text]")
+
             bottomBitmap.recycle()
+            fullBitmap.recycle()
 
-            val recognizedText = result.text
-            Log.e(TAG, "[OCR_BOTTOM] text='${recognizedText.take(50)}'")
-
-            recognizedText.contains("按住说话")
+            // 宽松匹配，避免识别多空格/换行干扰
+            text.contains("按住") || text.contains("说话")
         } catch (e: Exception) {
             Log.e(TAG, "底部OCR检测失败: ${e.message}")
             false

@@ -1,56 +1,44 @@
-**问题**：进入聊天页后，底部可能是文本输入模式，需先切换到“按住说话”再长按录音。  
-**解决**：在 `sendVoiceMessage` 中加入 OCR 检测与自动切换。
+问题出在 `isVoiceModeActive()` 中的 OCR 识别可能没拿到正确的底部文本，导致始终返回 false，从而每次都执行切换。
+
+**快速解决**：
+1. 在识别前加 `delay(300)` 确保动画完成。
+2. 匹配时用更宽松的条件：`contains("按住")` 或 `contains("说话")`，避免空格/换行导致失败。
+3. 添加日志打印识别到的底部文字，便于验证。
 
 ---
 
-### 修改文件：`WeChatVoiceFlow.kt`
-
-**新增方法** `ensureVoiceMode()`  
-- 截取屏幕（全屏或底部区域） → OCR 识别文本  
-- 若不包含“按住说话” → 点击 `(0.1f, 0.99f)` 切换按钮 → 等待 500ms  
-
-**修改 `sendVoiceMessage`**  
-- 调用 `ensureVoiceMode()` 后，再执行长按录音。
-
----
-
-### 核心代码
+### 修改后的代码（`WeChatVoiceFlow.kt`）
 
 ```kotlin
-// WeChatVoiceFlow.kt
-
 private suspend fun ensureVoiceMode() {
-    // 1. 截屏（根据你的截图工具调整，这里示例用 AccessibilityService 截图）
-    val bitmap = screenshotUtil.captureScreen() ?: return
-    // 2. OCR 识别
-    val text = mLKitOcrEngine.recognize(bitmap).text
-    bitmap.recycle()
-    // 3. 判断是否已在语音模式
-    if (!text.contains("按住说话")) {
-        // 4. 点击切换按钮（坐标已由你实测确定）
-        input.clickByRatio(0.1f, 0.99f)
-        delay(500) // 等待录音按钮出现
-        // 可选：再次检查，但正常一次足够
-    }
+    // 先等一下，避免界面正在切换中
+    delay(300)
+    if (isVoiceModeActive()) return
+    Log.e(TAG, "点击语音图标切换模式")
+    input.tapByRatio(VOICE_ICON_X_RATIO, VOICE_ICON_Y_RATIO)
+    delay(500)
 }
 
-suspend fun sendVoiceMessage(durationMs: Long = 2000L): Boolean {
-    return try {
-        ensureVoiceMode()                          // 确保底部是录音按钮
-        input.longPressByRatio(0.5f, 0.99f, durationMs) // 长按录音
-        true
-    } catch (e: Exception) {
-        Log.e(TAG, "语音发送失败: ${e.message}")
-        false
-    }
+private suspend fun isVoiceModeActive(): Boolean {
+    val fullBitmap = screenshotProvider.capture()
+    val cropTop = (height * 0.92f).toInt()
+    val bottomBitmap = Bitmap.createBitmap(fullBitmap, 0, cropTop, width, height - cropTop)
+
+    val result = ocrEngine.recognize(bottomBitmap, preferChinese = true)
+    val text = result.text
+    Log.e(TAG, "底部OCR识别文本: [$text]")
+
+    bottomBitmap.recycle()
+    fullBitmap.recycle()
+
+    // 宽松匹配，避免识别多空格/换行干扰
+    return text.contains("按住") || text.contains("说话")
 }
 ```
 
-### 依赖说明
-- `screenshotUtil.captureScreen()`：你的项目里全局截图工具，返回 `Bitmap?`。若无，可用 `AccessibilityService` 的 `takeScreenshot`（API 30+）。
-- `input.clickByRatio()`：你现有的点击方法。
-- `mLKitOcrEngine.recognize(bitmap)`：已接入的 ML Kit OCR，返回 `Text` 对象，`.text` 即为全部识别文字。
+**改动要点**：
+- 进入 `ensureVoiceMode` 先延迟 300ms，避免界面元素还没渲染完就截图。
+- 识别后用 `contains("按住")` 或 `contains("说话")` 双重判断，而不是精确“按住说话”。
+- 添加日志 `底部OCR识别文本: [...]`，运行时查看是否真的识别到了正确文字，用于微调裁剪区域或切换坐标。
 
----
-
-**效果**：识别到无“按住说话”时自动点击切换，再长按录音，彻底解决点击位置错误的问题。
+如果日志显示文字为空或不是底部内容，则调整 `cropTop` 比例（例如 `0.90f`），或改用全屏截图裁剪底部固定的像素高度（如 `height - 200`）。先用日志确认问题，再微调参数。
