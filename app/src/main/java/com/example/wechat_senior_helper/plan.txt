@@ -1,47 +1,25 @@
-1）两个悬浮窗都“顶格”
+修改指南
 
-你现在的 LayoutParams 里还有 x = 100 / y = 100，去掉边距，改成贴边。
+1）先补链路兜底
+在 ASR 的成功/失败回调里，都做三件事：
+updateStatus("就绪")、showMessage(...)、isExecuting = false。
+再加一个超时兜底：比如 15 秒内没回调，就强制把状态拉回“就绪”，并提示“识别超时”。
 
-状态窗
-private fun createStatusParams(): WindowManager.LayoutParams {
-    return WindowManager.LayoutParams(
-        WindowManager.LayoutParams.MATCH_PARENT,
-        WindowManager.LayoutParams.WRAP_CONTENT,
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
-            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
-        else
-            WindowManager.LayoutParams.TYPE_PHONE,
-        WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-            WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
-            WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
-        PixelFormat.TRANSLUCENT
-    ).apply {
-        gravity = Gravity.TOP
-        x = 0
-        y = 0
-    }
-}
-输入窗
+2）把 UI 收口成两层
+顶部只留状态输出，底部只留输入入口。
+如果你已经决定语音优先，那底部就只留“语音按钮 + 停止录音”；文本框和发送按钮可以删掉，或者作为隐藏调试入口保留，不要显示在正式界面里。
 
-如果你说的“顶格”是贴边不留空，也这样写：
+3）删掉旧按钮绑定
+把这些从 setupFloatingBallViews() 里移除或注释掉：
+btnSearchContact、btnOpenWeChat、btnExecuteTx、btnSendVoice（旧测试版）、btnVideoCall、btnStop、btnConfirm、btnChooseAudio、btnChooseVideo。
+正式 UI 只保留你真正要给用户看的控件，不然后面很容易误触。
 
-private fun createInputParams(): WindowManager.LayoutParams {
-    return WindowManager.LayoutParams(
-        WindowManager.LayoutParams.MATCH_PARENT,
-        WindowManager.LayoutParams.WRAP_CONTENT,
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
-            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
-        else
-            WindowManager.LayoutParams.TYPE_PHONE,
-        WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-            WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
-        PixelFormat.TRANSLUCENT
-    ).apply {
-        gravity = Gravity.TOP
-        x = 0
-        y = 0
-    }
-}
+4）把状态更新统一到一个入口
+现在 updateStatus() 还是直接找单个 tv_status。拆成双悬浮窗后，建议统一走一个状态窗口更新函数，避免一个窗隐藏后另一个还在用旧引用。showMessage() 也最好只负责顶部状态输出，不要再依赖旧的消息区控件。
 
-如果你实际想要的是“上面状态条顶上，下面输入条仍然在底部”，把 input 的 gravity 改回 BOTTOM 就行，其他不动。
+5）把“识别中”变成可恢复状态
+流程上建议固定成：
+录音中 → 识别中 → 成功进入 handleInputText() → 失败/超时回到就绪。
+不要让“识别中”成为终态。
+
+你现在最该先改的是：ASR 回调兜底 + UI 收口。这两处做完，链路和界面都会稳很多。

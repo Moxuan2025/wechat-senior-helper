@@ -22,6 +22,8 @@ import androidx.core.app.NotificationCompat
 import com.example.wechat_senior_helper.MainActivity
 import com.example.wechat_senior_helper.R
 import com.example.wechat_senior_helper.flow.CallMode
+import com.example.wechat_senior_helper.net.AsrHelper
+import com.example.wechat_senior_helper.net.AudioInputController
 import com.example.wechat_senior_helper.net.TencentSpeechHelper
 import com.example.wechat_senior_helper.flow.IntentHandler
 import com.example.wechat_senior_helper.transaction.Transaction
@@ -52,11 +54,16 @@ class FloatingBallService : Service() {
     private var currentTransaction: Transaction? = null
     private var isExecuting = false
     private var callInProgress = false
+    private var isRecording = false
+    private var isRecordingAudio = false
+    private var audioInputController: AudioInputController? = null
     private var pendingAction: IntentHandler.PendingAction? = null
     private lateinit var tvMessage: TextView
     private lateinit var llConfirmBar: LinearLayout
     private lateinit var llCallChooser: LinearLayout
     private lateinit var btnConfirm: Button
+    private lateinit var btnSendVoice: Button
+    private lateinit var btnSendIntent: Button
     private lateinit var btnReject: Button
     private lateinit var btnChooseAudio: Button
     private lateinit var btnChooseVideo: Button
@@ -202,7 +209,8 @@ class FloatingBallService : Service() {
 
     private fun setupInputViews() {
         val etIntent = inputView?.findViewById<EditText>(R.id.et_intent_text)
-        val btnSendIntent = inputView?.findViewById<Button>(R.id.btn_send_intent)
+        btnSendVoice = inputView?.findViewById(R.id.btn_send_voice)!!
+        btnSendIntent = inputView?.findViewById(R.id.btn_send_intent)!!
 
         // 消息 / 确认栏 / 电话类型选择
         tvMessage = statusView?.findViewById(R.id.tv_message)!!
@@ -213,84 +221,38 @@ class FloatingBallService : Service() {
         btnChooseAudio = inputView?.findViewById(R.id.btn_choose_audio)!!
         btnChooseVideo = inputView?.findViewById(R.id.btn_choose_video)!!
 
-        // --- 发送意图 ---
-        btnSendIntent?.setOnClickListener {
-            val text = etIntent?.text?.toString()?.trim() ?: return@setOnClickListener
-            if (text.isBlank()) return@setOnClickListener
-            etIntent?.text?.clear()
+        // 语音优先：隐藏文本框和发送按钮（调试时可改回 VISIBLE）
+        etIntent?.visibility = View.GONE
+        btnSendIntent.visibility = View.GONE
 
-            // 退出指令拦截，不走 LLM
-            if (isExitCommand(text)) {
-                closeAllOverlays()
-                stopSelf()
-                return@setOnClickListener
-            }
-
-            // 如果当前正在等待电话类型选择（CallMode.UNKNOWN），
-            // 用户用文本回复"视频电话/语音电话"时，直接复用 pendingAction.target 执行
-            val pending = pendingAction
-            if (pending is IntentHandler.PendingAction.Call && pending.mode == CallMode.UNKNOWN) {
-                val chosenMode: CallMode? = when {
-                    text.contains("视频") -> CallMode.VIDEO
-                    text.contains("语音") -> CallMode.AUDIO
-                    else -> null
-                }
-                if (chosenMode != null) {
-                    val service = AccessibilityServiceStateManager.instance
-                    if (service == null) {
-                        showMessage("无障碍服务未连接")
-                        return@setOnClickListener
-                    }
-                    hideCallModeChooser()
-                    pendingAction = null
-                    Log.e(TAG, "💬 电话类型选择: 目标=${pending.target} 模式=$chosenMode")
-                    updateStatus("执行中...")
-                    hideOverlays()
-                    serviceScope.launch {
-                        val ok = service.confirmAction(
-                            IntentHandler.PendingAction.Call(pending.target, chosenMode)
-                        )
-                        showMessage(if (ok) "执行完成" else "执行失败，请重试")
-                        showOverlays()
-                        updateStatus("就绪")
-                    }
+        // --- 文本降级：EditText 有内容时可用 ---
+        btnSendIntent.apply {
+            text = "发送"
+            setOnClickListener {
+                // 如果文本框有内容 → 文本模式（调试降级）
+                val typedText = etIntent?.text?.toString()?.trim()
+                if (!typedText.isNullOrBlank()) {
+                    etIntent?.text?.clear()
+                    handleInputText(typedText)
                     return@setOnClickListener
                 }
-            }
 
-            val service = AccessibilityServiceStateManager.instance
-            if (service == null) {
-                showMessage("无障碍服务未连接")
-                return@setOnClickListener
-            }
-            Log.e(TAG, "💬 意图输入: $text")
-            updateStatus("思考中...")
-            serviceScope.launch {
-                val result = service.handleIntent(text)
-                Log.e(TAG, ">>> LLM 返回: ${result::class.simpleName}, message='${when (result) { is IntentHandler.RouteResult.Reply -> result.message; is IntentHandler.RouteResult.NeedConfirm -> result.message; is IntentHandler.RouteResult.DirectExecute -> result.message; else -> "" }}'")
-                when (result) {
-                    is IntentHandler.RouteResult.DirectExecute -> {
-                        updateStatus("执行中...")
-                        hideOverlays()
-                        val ok = result.action.invoke()
-                        showMessage(if (ok) result.message else "执行失败，请重试")
-                        showOverlays()
-                        updateStatus("就绪")
-                    }
-                    is IntentHandler.RouteResult.NeedConfirm -> {
-                        hideKeyboardAndClearFocus()
-                        showMessage(result.message)
-                        pendingAction = result.pending
-                        btnConfirm.text = "确认"
-                        llConfirmBar.visibility = View.VISIBLE
-                        llCallChooser.visibility = View.GONE
-                        updateStatus("等待确认")
-                    }
-                    is IntentHandler.RouteResult.Reply -> {
-                        showMessage(result.message)
-                        updateStatus("就绪")
-                    }
+                // 语音模式：toggle 录音
+                if (isRecording) {
+                    stopVoiceInput()
+                    updateStatus("识别中…")
+                } else {
+                    startVoiceInput()
                 }
+            }
+        }
+
+        // --- 语音录音按钮 ---
+        btnSendVoice.setOnClickListener {
+            if (isRecordingAudio) {
+                stopAudioInput()
+            } else {
+                startAudioInput()
             }
         }
 
@@ -515,6 +477,216 @@ class FloatingBallService : Service() {
                     Log.d(TAG, "通话状态监测异常: ${e.message}")
                 }
                 delay(800)
+            }
+        }
+    }
+
+    // ============================================================
+    // 语音输入
+    // ============================================================
+
+    private fun startVoiceInput() {
+        isRecording = true
+        btnSendIntent.text = "停止"
+        updateStatus("正在听…")
+        tvMessage.text = ""
+        tvMessage.visibility = View.VISIBLE
+
+        AsrHelper.startRecognize(
+            context = this,
+            onStart = {
+                Log.e(TAG, "ASR 录音开始")
+            },
+            onRecognizing = { text ->
+                tvMessage.text = text
+                Log.d(TAG, "ASR 实时: $text")
+            },
+            onComplete = { text ->
+                Log.e(TAG, "ASR 完成: $text")
+                isRecording = false
+                btnSendIntent.text = "语音"
+                if (text.isBlank()) {
+                    updateStatus("就绪")
+                    return@startRecognize
+                }
+                updateStatus("识别中…")
+                handleInputText(text)
+            },
+            onError = { msg ->
+                Log.e(TAG, "ASR 错误: $msg")
+                isRecording = false
+                btnSendIntent.text = "语音"
+                showMessage("识别失败: $msg")
+                updateStatus("就绪")
+            }
+        )
+    }
+
+    private fun stopVoiceInput() {
+        AsrHelper.stopRecognize()
+        isRecording = false
+        btnSendIntent.text = "语音"
+    }
+
+    private fun runOnUiThread(action: () -> Unit) {
+        val looper = android.os.Looper.getMainLooper()
+        if (android.os.Looper.myLooper() == looper) action()
+        else android.os.Handler(looper).post(action)
+    }
+
+    // ============================================================
+    // 纯录音输入（AudioInputController，暂不接 ASR）
+    // ============================================================
+
+    private fun hasRecordAudioPermission(): Boolean {
+        return checkSelfPermission(android.Manifest.permission.RECORD_AUDIO) ==
+                android.content.pm.PackageManager.PERMISSION_GRANTED
+    }
+
+    private fun openMainActivityForPermission() {
+        try {
+            val intent = Intent(this, MainActivity::class.java).apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                putExtra("request_permission", "record_audio")
+            }
+            startActivity(intent)
+        } catch (e: Exception) {
+            Log.e(TAG, "打开主界面申请权限失败: ${e.message}", e)
+        }
+    }
+
+    private fun ensureAudioController() {
+        if (audioInputController == null) {
+            audioInputController = AudioInputController(this)
+        }
+    }
+
+    private fun startAudioInput() {
+        if (isExecuting) {
+            updateStatus("操作进行中...")
+            return
+        }
+        if (!hasRecordAudioPermission()) {
+            updateStatus("请先开启麦克风权限")
+            openMainActivityForPermission()
+            return
+        }
+        isRecordingAudio = true
+        refreshVoiceButtonText()
+        updateStatus("正在听…")
+
+        AsrHelper.startRecognize(
+            context = this,
+            onStart = {
+                Log.e(TAG, "实时 ASR 录音已启动")
+            },
+            onRecognizing = { text ->
+                runOnUiThread { tvMessage.text = text; tvMessage.visibility = View.VISIBLE }
+            },
+            onComplete = { text ->
+                Log.e(TAG, "实时 ASR 完成: $text")
+                runOnUiThread {
+                    isRecordingAudio = false
+                    refreshVoiceButtonText()
+                    if (text.isNotBlank()) {
+                        handleInputText(text)
+                    } else {
+                        updateStatus("就绪")
+                        showMessage("未识别到内容")
+                    }
+                }
+            },
+            onError = { msg ->
+                Log.e(TAG, "实时 ASR 失败: $msg")
+                runOnUiThread {
+                    isRecordingAudio = false
+                    refreshVoiceButtonText()
+                    updateStatus("就绪")
+                    showMessage("识别失败: $msg")
+                }
+            }
+        )
+    }
+
+    private fun stopAudioInput() {
+        AsrHelper.stopRecognize()
+        updateStatus("识别中…")
+    }
+
+    private fun refreshVoiceButtonText() {
+        btnSendVoice.text = if (isRecordingAudio) "停止录音" else "语音"
+    }
+
+    // ============================================================
+    // 统一输入处理（语音 & 文本共用）
+    // ============================================================
+
+    private fun handleInputText(text: String) {
+        // 退出指令拦截
+        if (isExitCommand(text)) {
+            closeAllOverlays()
+            stopSelf()
+            return
+        }
+
+        // 电话类型选择中：解析语音/视频关键词
+        val pending = pendingAction
+        if (pending is IntentHandler.PendingAction.Call && pending.mode == CallMode.UNKNOWN) {
+            val chosenMode: CallMode? = when {
+                text.contains("视频") -> CallMode.VIDEO
+                text.contains("语音") -> CallMode.AUDIO
+                else -> null
+            }
+            if (chosenMode != null) {
+                val svc = AccessibilityServiceStateManager.instance
+                if (svc == null) { showMessage("无障碍服务未连接"); return }
+                hideCallModeChooser()
+                pendingAction = null
+                Log.e(TAG, "💬 电话类型选择: 目标=${pending.target} 模式=$chosenMode")
+                updateStatus("执行中...")
+                hideOverlays()
+                serviceScope.launch {
+                    val ok = svc.confirmAction(IntentHandler.PendingAction.Call(pending.target, chosenMode))
+                    showMessage(if (ok) "执行完成" else "执行失败，请重试")
+                    showOverlays()
+                    updateStatus("就绪")
+                }
+                return
+            }
+        }
+
+        val service = AccessibilityServiceStateManager.instance
+        if (service == null) {
+            showMessage("无障碍服务未连接")
+            return
+        }
+        Log.e(TAG, "💬 意图输入: $text")
+        updateStatus("思考中...")
+        serviceScope.launch {
+            val result = service.handleIntent(text)
+            Log.e(TAG, ">>> LLM 返回: ${result::class.simpleName}, message='${when (result) { is IntentHandler.RouteResult.Reply -> result.message; is IntentHandler.RouteResult.NeedConfirm -> result.message; is IntentHandler.RouteResult.DirectExecute -> result.message; else -> "" }}'")
+            when (result) {
+                is IntentHandler.RouteResult.DirectExecute -> {
+                    updateStatus("执行中...")
+                    hideOverlays()
+                    val ok = result.action.invoke()
+                    showMessage(if (ok) result.message else "执行失败，请重试")
+                    showOverlays()
+                    updateStatus("就绪")
+                }
+                is IntentHandler.RouteResult.NeedConfirm -> {
+                    hideKeyboardAndClearFocus()
+                    showMessage(result.message)
+                    pendingAction = result.pending
+                    btnConfirm.text = "确认"
+                    llConfirmBar.visibility = View.VISIBLE
+                    llCallChooser.visibility = View.GONE
+                    updateStatus("等待确认")
+                }
+                is IntentHandler.RouteResult.Reply -> {
+                    showMessage(result.message)
+                    updateStatus("就绪")
+                }
             }
         }
     }
