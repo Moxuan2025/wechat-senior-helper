@@ -32,6 +32,13 @@ class ChatNavigationGuard(
         private const val CHAT_TOP_START_Y = 0.06f
         private const val CHAT_TOP_END_Y = 0.13f
 
+        // 底部 Tab 栏裁剪
+        private const val BOTTOM_TAB_START_Y = 0.85f
+        private const val BOTTOM_TAB_END_Y = 1.0f
+
+        // 底部 Tab 关键词
+        private val BOTTOM_TAB_KEYWORDS = listOf("微信", "通讯录", "发现", "我")
+
         // 匹配阈值
         private const val NAME_MATCH_THRESHOLD = 0.7f
 
@@ -50,7 +57,7 @@ class ChatNavigationGuard(
         if (!isWeChatForeground()) {
             Log.e(TAG, "启动微信")
             WeChatLauncher.launchWeChat(context)
-            delay(2000)
+            delay(800)
             if (!isWeChatForeground()) return "无法打开微信"
         }
 
@@ -84,7 +91,7 @@ class ChatNavigationGuard(
     suspend fun ensureChatWithTarget(targetName: String): Boolean {
         if (!isWeChatForeground()) {
             WeChatLauncher.launchWeChat(context)
-            delay(2000)
+            delay(800)
             if (!isWeChatForeground()) return false
         }
         if (isCorrectChat(targetName)) return true
@@ -110,21 +117,47 @@ class ChatNavigationGuard(
     }
 
     /**
-     * 识别微信首页：顶部居中区域 OCR 检测到"微信"二字。
-     * "微信"标题在搜索图标同高度(0%~10%)、水平居中(25%~75%)。
+     * 识别微信首页，满足任一条件即判定为首页：
+     * 1. 顶部居中区域 OCR 检测到"微信"（原标题检测）
+     * 2. 底部 Tab 栏同时出现 {微信, 通讯录, 发现, 我} 中 ≥3 个
      */
     private suspend fun isHomePage(): Boolean {
         val bitmap = try { screenshotProvider.capture() } catch (_: Exception) { return false }
-        val left = (bitmap.width * TITLE_CROP_X_START).toInt()
-        val top = (bitmap.height * TITLE_CROP_Y_START).toInt()
-        val right = (bitmap.width * TITLE_CROP_X_END).toInt()
-        val bottom = (bitmap.height * TITLE_CROP_Y_END).toInt()
-        if (right <= left || bottom <= top) return false
-        val crop = Bitmap.createBitmap(bitmap, left, top, right - left, bottom - top)
-        val text = ocrEngine.recognize(crop).text
-        crop.recycle()
-        Log.e(TAG, "首页检测: '$text'")
-        return text.contains("微信")
+
+        // 条件 1：顶部标题检测
+        val topLeft = (bitmap.width * TITLE_CROP_X_START).toInt()
+        val topTop = (bitmap.height * TITLE_CROP_Y_START).toInt()
+        val topRight = (bitmap.width * TITLE_CROP_X_END).toInt()
+        val topBottom = (bitmap.height * TITLE_CROP_Y_END).toInt()
+
+        var topHit = false
+        if (topRight > topLeft && topBottom > topTop) {
+            val topCrop = Bitmap.createBitmap(bitmap, topLeft, topTop, topRight - topLeft, topBottom - topTop)
+            val topText = ocrEngine.recognize(topCrop).text
+            topCrop.recycle()
+            topHit = topText.contains("微信")
+            Log.e(TAG, "首页检测[顶部]: '$topText' -> $topHit")
+        }
+
+        // 条件 2：底部 Tab 检测
+        val botLeft = 0
+        val botTop = (bitmap.height * BOTTOM_TAB_START_Y).toInt()
+        val botRight = bitmap.width
+        val botBottom = (bitmap.height * BOTTOM_TAB_END_Y).toInt()
+
+        var bottomHit = false
+        if (botBottom > botTop) {
+            val botCrop = Bitmap.createBitmap(bitmap, botLeft, botTop, botRight - botLeft, botBottom - botTop)
+            val botText = ocrEngine.recognize(botCrop).text
+            botCrop.recycle()
+            val matched = BOTTOM_TAB_KEYWORDS.count { botText.contains(it) }
+            bottomHit = matched >= 3
+            Log.e(TAG, "首页检测[底部]: '$botText' -> 匹配${matched}/4 -> $bottomHit")
+        }
+
+        val result = topHit || bottomHit
+        Log.e(TAG, "首页检测: 顶部=$topHit 底部=$bottomHit -> $result")
+        return result
     }
 
     suspend fun goToHome() {

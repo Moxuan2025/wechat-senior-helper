@@ -52,6 +52,16 @@ dependencies {
     implementation(libs.kotlinx.coroutines.core)
     implementation(libs.kotlinx.coroutines.android)
     
+    // AAR 本地库（TTS 等）
+    implementation(fileTree(mapOf("dir" to "libs", "include" to listOf("*.jar", "*.aar"))))
+
+    // Media3 ExoPlayer（TTS 音频播放）
+    implementation("androidx.media3:media3-exoplayer:1.3.0")
+
+    // OkHttp + Gson（TTS SDK 依赖）
+    implementation("com.squareup.okhttp3:okhttp:4.12.0")
+    implementation("com.google.code.gson:gson:2.8.9")
+
     // ML Kit for OCR text recognition (bundled Chinese model)
     implementation("com.google.mlkit:text-recognition:16.0.1")
     implementation("com.google.mlkit:text-recognition-chinese:16.0.1")

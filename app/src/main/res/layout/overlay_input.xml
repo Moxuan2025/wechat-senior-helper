@@ -1,0 +1,101 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:orientation="vertical"
+    android:background="@drawable/bg_input_gradient"
+    android:elevation="8dp"
+    android:padding="10dp">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal">
+
+        <EditText
+            android:id="@+id/et_intent_text"
+            android:layout_width="0dp"
+            android:layout_height="40dp"
+            android:layout_weight="1"
+            android:hint="说点什么..."
+            android:textSize="15sp"
+            android:background="@android:color/transparent"
+            android:padding="0dp"
+            android:textColor="#FFFFFF"
+            android:textColorHint="#AAFFFFFF" />
+
+        <Button
+            android:id="@+id/btn_send_intent"
+            android:layout_width="wrap_content"
+            android:layout_height="40dp"
+            android:text="发送"
+            android:textColor="#FFFFFF"
+            android:background="@android:color/transparent"
+            android:textSize="14sp" />
+    </LinearLayout>
+
+    <LinearLayout
+        android:id="@+id/ll_confirm_bar"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:layout_marginTop="6dp"
+        android:visibility="gone">
+
+        <Button
+            android:id="@+id/btn_confirm"
+            android:layout_width="0dp"
+            android:layout_height="44dp"
+            android:layout_weight="1"
+            android:layout_marginEnd="6dp"
+            android:text="确认"
+            android:textColor="#FFFFFF"
+            android:textSize="15sp"
+            android:background="@drawable/bg_confirm_green"
+            android:elevation="6dp" />
+
+        <Button
+            android:id="@+id/btn_reject"
+            android:layout_width="0dp"
+            android:layout_height="44dp"
+            android:layout_weight="1"
+            android:layout_marginStart="6dp"
+            android:text="否决"
+            android:textColor="#FFFFFF"
+            android:textSize="15sp"
+            android:background="@drawable/bg_reject_red"
+            android:elevation="6dp" />
+    </LinearLayout>
+
+    <LinearLayout
+        android:id="@+id/ll_call_chooser"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:layout_marginTop="6dp"
+        android:visibility="gone">
+
+        <Button
+            android:id="@+id/btn_choose_audio"
+            android:layout_width="0dp"
+            android:layout_height="44dp"
+            android:layout_weight="1"
+            android:layout_marginEnd="6dp"
+            android:text="语音电话"
+            android:textColor="#FFFFFF"
+            android:background="@android:color/transparent"
+            android:textSize="14sp" />
+
+        <Button
+            android:id="@+id/btn_choose_video"
+            android:layout_width="0dp"
+            android:layout_height="44dp"
+            android:layout_weight="1"
+            android:layout_marginStart="6dp"
+            android:text="视频电话"
+            android:textColor="#FFFFFF"
+            android:background="@android:color/transparent"
+            android:textSize="14sp" />
+    </LinearLayout>
+
+</LinearLayout>

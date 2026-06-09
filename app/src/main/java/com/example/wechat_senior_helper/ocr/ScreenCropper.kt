@@ -16,6 +16,12 @@ object ScreenCropper {
         return cropVertical(full, top, bottom)
     }
 
+    fun cropBottomArea(full: Bitmap): Bitmap {
+        val top = (full.height * 0.78f).toInt().coerceAtLeast(0)
+        val bottom = full.height
+        return cropVertical(full, top, bottom)
+    }
+
     private fun cropVertical(full: Bitmap, top: Int, bottom: Int): Bitmap {
         val safeTop = top.coerceIn(0, full.height - 1)
         val safeBottom = bottom.coerceIn(safeTop + 1, full.height)

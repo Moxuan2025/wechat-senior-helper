@@ -2,6 +2,7 @@ package com.example.wechat_senior_helper.ocr
 
 import android.graphics.Bitmap
 import android.graphics.Rect
+import android.util.Log
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlin.math.abs
@@ -9,9 +10,13 @@ import kotlin.math.abs
 class WechatScreenAnalyzer(
     private val ocrEngine: MlKitOcrEngine
 ) {
+    companion object {
+        private const val TAG = "WechatScreenAnalyzer"
+    }
     suspend fun findContactHit(fullScreen: Bitmap, targetName: String): OcrHit? = withContext(Dispatchers.Default) {
         val cropped = ScreenCropper.cropSearchResultArea(fullScreen)
         val text = ocrEngine.recognize(cropped, preferChinese = true)
+        Log.e(TAG, "[OCR_SEARCH] target='$targetName' fullText='${text.text.take(500)}'")
         val hit = OcrLineMatcher.findBestContactLine(text, targetName) ?: return@withContext null
 
         val offsetTop = (fullScreen.height * 0.16f).toInt()

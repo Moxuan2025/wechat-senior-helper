@@ -20,6 +20,7 @@ import com.example.wechat_senior_helper.flow.WeChatVoiceFlow
 import com.example.wechat_senior_helper.input.CoordinateInputHelper
 import com.example.wechat_senior_helper.ocr.AccessibilityScreenshotProvider
 import com.example.wechat_senior_helper.ocr.MlKitOcrEngine
+import com.example.wechat_senior_helper.ocr.ScreenCropper
 import com.example.wechat_senior_helper.ocr.WechatScreenAnalyzer
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -276,6 +277,26 @@ class WeChatAssistAccessibilityService : AccessibilityService() {
     private fun isWeChatForeground(): Boolean {
         val root = rootInActiveWindow ?: return false
         return root.packageName == "com.tencent.mm"
+    }
+
+    // ===================== 通话状态检测 =====================
+    suspend fun isWeChatInCall(): Boolean {
+        if (!::screenshotProvider.isInitialized || !::ocrEngine.isInitialized) return false
+        return try {
+            val screenshot = screenshotProvider.capture()
+            val bottomArea = ScreenCropper.cropBottomArea(screenshot)
+            val text = normalizeOcrText(ocrEngine.recognize(bottomArea, preferChinese = true).text)
+            text.contains("取消") &&
+                text.contains("扬声器") &&
+                text.contains("麦克风")
+        } catch (e: Exception) {
+            Log.d(TAG, "通话检测异常: ${e.message}")
+            false
+        }
+    }
+
+    private fun normalizeOcrText(text: String): String {
+        return text.replace("\\s+".toRegex(), "")
     }
 
     // ===================== 手势/坐标操作 =====================

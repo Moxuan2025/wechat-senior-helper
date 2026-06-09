@@ -1,0 +1,18 @@
+<shape xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- 圆角 -->
+    <corners android:radius="16dp"/>
+
+    <!-- 渐变：左深蓝 → 右暖橙 -->
+    <gradient
+        android:angle="0"
+        android:startColor="#CC0A1F44"
+        android:endColor="#CCFF8A3D"/>
+
+    <!-- 内边距 -->
+    <padding
+        android:left="12dp"
+        android:right="12dp"
+        android:top="8dp"
+        android:bottom="8dp"/>
+</shape>

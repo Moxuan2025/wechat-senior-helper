@@ -147,7 +147,7 @@ class IntentHandler(
                             delay(200)
                             voiceFlow.sendVoiceMessage()
                         },
-                        message = "好的，正在给${target}发语音..."
+                        message = "已给${target}发语音"
                     )
                 }
             }
@@ -174,7 +174,7 @@ class IntentHandler(
                             delay(800)
                             videoCallFlow.makeCall(CallMode.AUDIO)
                         },
-                        message = "好的，正在给${target}打语音电话..."
+                        message = "已给${target}打语音电话"
                     )
                 }
             }
@@ -192,7 +192,7 @@ class IntentHandler(
                             delay(800)
                             videoCallFlow.makeCall(CallMode.VIDEO)
                         },
-                        message = "好的，正在给${target}打视频电话..."
+                        message = "已给${target}打视频电话"
                     )
                 }
             }
@@ -328,10 +328,10 @@ callMode 只能是：
     // ===================== 兜底回复 =====================
     private fun defaultReply(actionType: ActionType?, target: String): String {
         return when (actionType) {
-            ActionType.AUDIO_CALL -> "好的，正在给${target}打电话..."
-            ActionType.VOICE_MESSAGE -> "好的，正在给${target}发语音..."
-            ActionType.VIDEO_CALL -> "好的，正在和${target}视频通话..."
-            else -> "好的，正在处理..."
+            ActionType.AUDIO_CALL -> "已给${target}打电话"
+            ActionType.VOICE_MESSAGE -> "已给${target}发语音"
+            ActionType.VIDEO_CALL -> "已给${target}打视频电话"
+            else -> "已完成"
         }
     }
 
